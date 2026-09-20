@@ -1,0 +1,83 @@
+# Killswitch — benchtop node configuration.
+# Every tunable lives here. No magic numbers in code (CLAUDE.md coding standards).
+
+node:
+  id: "killswitch-01"
+  tick_hz: 100          # State machine tick. Fast: it enforces every fail-safe.
+
+camera:
+  device_index: 0
+  width: 1280
+  height: 720
+  target_fps: 60
+  use_mjpg: true
+  # Horizontal field of view, degrees. CALIBRATE THIS: point at a known angular
+  # span and measure. It sets the pixel-to-degree gain for the whole control
+  # loop, so an error here shows up as sluggish or oscillatory tracking.
+  horizontal_fov_deg: 65.0
+
+detector:
+  weights: "model/best.pt"
+  conf_threshold: 0.40
+  iou_threshold: 0.50
+  imgsz: 640
+  target_classes: ["drone"]
+  device: null          # null = let ultralytics choose (cuda > mps > cpu)
+
+targeting:
+  # Normalised offset within the detected box.
+  #   ( 0.00,  0.00) centre of mass
+  #   (-0.35, -0.35) forward rotor hub
+  #   ( 0.00,  0.40) slung payload
+  offset_x: 0.0
+  offset_y: 0.0
+  # Below this box dimension the offset is inside box jitter, so the solver
+  # reverts to centre-of-mass and says so.
+  min_box_px: 40.0
+
+control:
+  proportional_gain: 0.6     # Under-damped above ~1.0 on SG90s.
+  max_step_deg: 6.0          # Per tick, per axis. Firmware also rate-limits.
+  deadband_px: 3.0           # Below this, do not command — SG90s just buzz.
+
+prediction:
+  smoothing: 0.4
+  max_lead_px: 250.0
+  # Seed only; replaced by live measurement within a few frames.
+  initial_compute_latency_s: 0.060
+  # Servo travel allowance. NOT measurable — SG90s have no position feedback.
+  # Estimated, and labelled as estimated wherever it surfaces.
+  mechanical_allowance_s: 0.060
+
+engagement:
+  hold_error_px: 15.0        # Error band for HOLD.
+  hold_duration_s: 3.0       # Continuous. Resets on any excursion.
+  track_loss_timeout_s: 1.0  # No target for this long -> back to SCAN.
+  scan_timeout_s: 30.0       # No detection for this long -> IDLE.
+  auth_timeout_s: 10.0       # No operator decision -> back to TRACK.
+  burn_duration_s: 2.0       # Firmware enforces its own ceiling regardless.
+
+scan:
+  pan_step_deg: 4.0
+  tilt_step_deg: 8.0
+  max_cycles: 2
+  # Azimuth the gimbal faces at pan centre. Cues outside +/-90 of this are
+  # rejected, not clamped.
+  boresight_azimuth_deg: 0.0
+
+actuator:
+  port: "/dev/cu.usbserial-0001"   # UART bridge, NOT native USB-CDC.
+  baud: 921600
+  stow_pan_deg: 90.0
+  stow_tilt_deg: 90.0
+
+c2:
+  broker_host: "localhost"
+  broker_port: 1883
+  # Shared secret on operator auth. null disables token checking, which is
+  # acceptable ONLY on an isolated demo network and must be stated as such.
+  auth_token: "sdth-demo-token"
+
+display:
+  enabled: true
+  window_name: "Killswitch"

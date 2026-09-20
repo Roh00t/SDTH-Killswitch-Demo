@@ -332,11 +332,16 @@ class MockActuator(ActuatorDriver):
         self._record(f"A{self.pan:.1f},{self.tilt:.1f}")
 
     def arm(self) -> None:
-        if self.estop_latched:
-            self.rejections.append("arm while e-stop latched")
-            if self._strict:
-                raise ActuatorError("E08: e-stop latched, re-arm blocked")
-            return
+        """Arm, clearing the soft e-stop latch.
+
+        Mirrors the firmware exactly: a CHECKSUMMED M1 sets `estopLatched =
+        false` and arms. The soft latch exists so a freshly-booted or faulted
+        board refuses to fire until something deliberately and verifiably arms
+        it — not to make recovery require a power cycle. The barrier that needs
+        human action is the physical interlock in series with the effector
+        (guardrails section 2, HARD), which no software path can clear.
+        """
+        self.estop_latched = False
         self.armed = True
         self._record("M1")
 
@@ -370,8 +375,7 @@ class MockActuator(ActuatorDriver):
         self._record("Z")
 
     def clear_estop(self) -> None:
-        """Clear the latch. No firmware equivalent by design — a real e-stop is
-        cleared by an operator, not by software. Test affordance only."""
+        """Clear the soft latch without arming. Test affordance."""
         self.estop_latched = False
         self._record("clear_estop")
 

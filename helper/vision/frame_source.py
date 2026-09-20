@@ -246,17 +246,30 @@ class MockFrameSource(FrameSource):
     contrived stub has something to find.
     """
 
-    def __init__(self, width: int = 640, height: int = 480) -> None:
+    def __init__(self, width: int = 640, height: int = 480, fps: float = 60.0) -> None:
+        """Args:
+            fps: Synthetic frame rate. Rate-limiting matters: an unthrottled
+                mock lets the vision worker free-run at thousands of iterations
+                per second, so mock timings bear no relation to real ones and
+                scripted fixtures are consumed almost instantly.
+        """
         self._size = (width, height)
+        self._period = 1.0 / fps if fps > 0 else 0.0
         self._frame_id = 0
         self._running = False
+        self._last_emit = 0.0
 
     def start(self) -> None:
         self._running = True
+        self._last_emit = time.monotonic()
 
     def read(self) -> Tuple[Optional[np.ndarray], int]:
         if not self._running:
             return (None, self._frame_id)
+        now = time.monotonic()
+        if now - self._last_emit < self._period:
+            return (None, self._frame_id)
+        self._last_emit = now
         self._frame_id += 1
         frame = np.zeros((self._size[1], self._size[0], 3), dtype=np.uint8)
         return (frame, self._frame_id)

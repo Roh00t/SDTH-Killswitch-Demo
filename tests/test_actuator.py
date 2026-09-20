@@ -86,12 +86,19 @@ class TestEmergencyStop:
         assert actuator.armed is False
         assert actuator.estop_latched is True
 
-    def test_latched_estop_blocks_rearm(self, actuator):
-        actuator.emergency_stop()
-        with pytest.raises(ActuatorError, match="E08"):
-            actuator.arm()
+    def test_checksummed_arm_clears_the_soft_latch(self, actuator):
+        """Mirrors firmware: a checksummed M1 sets estopLatched = false.
 
-    def test_latched_estop_blocks_fire(self, actuator):
+        The soft latch stops a booted-or-faulted board firing until something
+        deliberately arms it. It is not the human barrier — that is the physical
+        interlock, which no software path can clear.
+        """
+        actuator.emergency_stop()
+        assert actuator.estop_latched is True
+        actuator.arm()
+        assert actuator.estop_latched is False and actuator.armed is True
+
+    def test_latched_estop_blocks_fire_without_an_intervening_arm(self, actuator):
         actuator.arm()
         actuator.emergency_stop()
         with pytest.raises(ActuatorError, match="E08"):

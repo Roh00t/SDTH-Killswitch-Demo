@@ -1,348 +1,703 @@
-from helper.PiCameraInterface import PiCameraInterface
-from helper.FPSLimiter import FPSLimiter
-from helper.MQTT import MQTT_Subscriber, MQTT_Publisher, MQTT_TOPIC_CAM, MQTT_TOPIC_PI_ZERO_CONTROLS, MQTT_TOPIC_SERVER_CONTROLS
-from helper.utils import get_closest_coords, get_object_displacement
-from helper.BoardInterface import BoardInterface
-from helper.RaspberryPiZero2 import RaspberryPiZero2
-from helper.YoloV5_ONNX import YoloV5_ONNX
-from helper.sound import load_model, predict_from_audio, record_audio
-from main_helper import scan_handle_x, STATES, handle_picam
+"""Killswitch — SDDE Counter-UAS node entry point.
 
-import time
-import traceback
-import threading
-import sys
-import speech_recognition as sr
-import os
+Wiring and the state machine loop. All domain logic lives in helper/; this file
+constructs, sequences and tears down.
+
+Read architecture.md section 5 for the engagement lifecycle and guardrails.md
+section 2 before changing anything on the effector path.
+
+Usage:
+    python main.py --config config/bench.yaml
+    python main.py --config config/bench.yaml --mock      # no hardware
+"""
+from __future__ import annotations
+
 import argparse
+import logging
+import signal
+import sys
+import threading
+import time
+from typing import Any, Dict, Optional, Tuple
 
-global_data = {
-    # App
-    "is_running": True,
-    "board": None,
-    "yolov5": None,
+import yaml
 
-    # Cam
-    "picam": None,
-    "cam_resolution": 256,
-    "cam_size": (256, 256),
-    "cam_center": (256/2, 256/2),
-    "curr_frame": None,
+from helper.comms.mqtt_client import C2Client, MockC2Client
+from helper.comms.schemas import OperatorAuth, SlewToCue
+from helper.hardware.actuator import ActuatorDriver, ActuatorError, MockActuator, SerialActuator
+from helper.state.machine import (
+    EngagementState,
+    IllegalTransitionError,
+    SnapshotHolder,
+    StateMachine,
+    TrackSnapshot,
+    Transition,
+)
+from helper.state.sweep import SweepController, cue_to_gimbal
+from helper.vision.aimpoint import AimpointSolver, error_magnitude, select_priority_target
+from helper.vision.detector import Detector, DetectorError, ScriptedDetector, UltralyticsDetector
+from helper.vision.frame_source import FrameSource, MockFrameSource, UsbCameraSource
+from helper.vision.predictor import AimpointPredictor, LatencyTracker
 
-    # Logic
-    "state": int,
-    "scan_dir_x": False,
-    "scan_dir_y": False,
-    "last_bird_time": time.time(),
-    "most_recent_sound": None,
-    "most_recent_sound_peak_amp": None, 
+logger = logging.getLogger("killswitch")
 
-    # Server
-    "mqtt_cam_feed": None,
-    "mqtt_cam_controls": None,
-    "mqtt_server_controls": None,
-    "server_processing": False
-}
 
-def cam_controls_callback(client, userdata, msg):
-    recieved: str = msg.payload.decode()
-    # Only valid messages should be recieved, so no need to make checks
-    recieved = recieved.split(":")
-    try:
-        # Manually Change State
-        if recieved[0] == "state":
-            if recieved[1] == "idle":
-                change_state(STATES.IDLE)
-            elif recieved[1] == "scan":
-                change_state(STATES.SCAN)
-            elif recieved[1] == "tracking":
-                change_state(STATES.TRACKING)
-            elif recieved[1] == "quit":
-                change_state(STATES.QUIT)
-        
-        # Only turn if current state is tracking
-        if global_data["state"] == STATES.TRACKING:
-            global_data["last_bird_time"] = time.time()
+class KillswitchNode:
+    """The targeting brain.
 
-            board: BoardInterface = global_data["board"]
-            if recieved[0] == "turnx":
-                angle = int(recieved[1])
-                board.turn_servo_x(angle)
+    Thread topology (see architecture.md section 2):
 
-            elif recieved[0] == "turny":
-                angle = int(recieved[1])
-                board.turn_servo_y(angle)
+        main               state machine tick loop; the ONLY writer of state
+        frame-grabber      inside UsbCameraSource; newest-frame-wins
+        vision-worker      detection + tracking + aimpoint; publishes snapshots
+        mqtt-network       paho; validates and enqueues, never acts
+        serial-reader      inside SerialActuator; parses status frames
+        serial-heartbeat   inside SerialActuator; refreshes the firmware deadman
 
-        # If the state is scanning, then any turn command means an object was detected by the server
-        elif global_data["state"] == STATES.SCAN:
-            if recieved[0] in ["turnx", "turny"]:
-                change_state(STATES.TRACKING)
+    Cross-thread state moves through exactly three guarded objects: StateMachine
+    (RLock), SnapshotHolder (Lock), and the C2 inbox (Queue). There is no shared
+    mutable dict — that pattern is what this refactor removed.
+    """
 
-    except Exception as e:
-        print(f"Exception {e}")
+    def __init__(self, config: Dict[str, Any], mock: bool = False) -> None:
+        self._cfg = config
+        self._mock = mock
 
-def thread_model():
-    os.sched_setaffinity(0, {1, 2, 3})
-    # Images
-    CAM_RESOLUTION = global_data["cam_resolution"]
-    if not global_data["server_processing"]:
-        yolov5 = YoloV5_ONNX(f"model/yolov5n_{CAM_RESOLUTION}.onnx", image_size=(CAM_RESOLUTION, CAM_RESOLUTION))
+        # Dependencies are declared here and CONSTRUCTED in start(). Nothing is
+        # implicitly available; nothing starts before it is injected.
+        self._camera: Optional[FrameSource] = None
+        self._detector: Optional[Detector] = None
+        self._actuator: Optional[ActuatorDriver] = None
+        self._c2 = None
 
-    # Server
-    mqtt_cam_controls: MQTT_Subscriber = global_data["mqtt_cam_controls"]
+        self._machine = StateMachine(on_transition=self._publish_transition)
+        self._snapshots = SnapshotHolder()
+        self._solver = AimpointSolver(
+            offset_x=config["targeting"]["offset_x"],
+            offset_y=config["targeting"]["offset_y"],
+            min_box_px=config["targeting"]["min_box_px"],
+        )
+        self._predictor = AimpointPredictor(
+            smoothing=config["prediction"]["smoothing"],
+            max_lead_px=config["prediction"]["max_lead_px"],
+        )
+        self._latency = LatencyTracker(
+            initial_estimate_s=config["prediction"]["initial_compute_latency_s"],
+            mechanical_allowance_s=config["prediction"]["mechanical_allowance_s"],
+        )
+        self._sweep = SweepController(
+            pan_step_deg=config["scan"]["pan_step_deg"],
+            tilt_step_deg=config["scan"]["tilt_step_deg"],
+            max_cycles=config["scan"]["max_cycles"],
+        )
 
-    # Audio Model
-    sound_model = load_model("model/bird_sound_model.onnx")
-    recognizer = sr.Recognizer()
-    with sr.Microphone(sample_rate=16000) as source:
-        recognizer.adjust_for_ambient_noise(source)
-        rrl = FPSLimiter(3)
-        time.sleep(1)
-        # os.system('clear')
-        change_state(STATES.IDLE)
-        while global_data["is_running"]:
+        self._running = threading.Event()
+        self._vision_thread: Optional[threading.Thread] = None
+
+        # Engagement bookkeeping. Owned by the main thread only.
+        self._commanded: Tuple[float, float] = (
+            config["actuator"]["stow_pan_deg"],
+            config["actuator"]["stow_tilt_deg"],
+        )
+        self._hold_started_at: Optional[float] = None
+        self._last_target_seen: float = 0.0
+        self._active_track_id: Optional[int] = None
+        self._active_target_id: Optional[str] = None
+        self._burn_started_at: Optional[float] = None
+        self._consumed_nonces: set = set()
+        self._deg_per_px: float = 0.05
+        self._engagement_metrics: Dict[str, Any] = {}
+
+    # ---- lifecycle -------------------------------------------------------
+
+    def start(self) -> None:
+        """Construct and connect every dependency, THEN start worker threads.
+
+        Ordering is the fix for the legacy init race, where the model thread was
+        started at main.py:187 and immediately called change_state(IDLE), which
+        dereferenced global_data["board"] — assigned 24 lines later at :211. It
+        survived only because ONNX loading was slow enough to lose the race.
+
+        Here nothing is started until everything it touches exists and is
+        connected, and the vision worker asserts its dependencies before its
+        first iteration.
+
+        Raises:
+            RuntimeError: If any dependency fails to initialise. Partial startup
+                always tears down rather than running degraded.
+        """
+        logger.info("Starting node (mock=%s)", self._mock)
+        try:
+            self._build_actuator()      # 1. effector first: safe state established
+            self._build_camera()        # 2. sensor
+            self._build_detector()      # 3. model
+            self._build_c2()            # 4. comms
+        except Exception:
+            logger.critical("Startup failed; tearing down")
+            self.shutdown()
+            raise
+
+        assert self._camera is not None and self._detector is not None
+        assert self._actuator is not None and self._c2 is not None
+
+        width, _ = self._camera.frame_size
+        self._deg_per_px = self._cfg["camera"]["horizontal_fov_deg"] / float(width)
+        logger.info(
+            "Control gain: %.4f deg/px (FOV %.1f over %d px)",
+            self._deg_per_px, self._cfg["camera"]["horizontal_fov_deg"], width,
+        )
+
+        # Only now do threads start.
+        self._running.set()
+        self._vision_thread = threading.Thread(
+            target=self._vision_loop, name="vision-worker", daemon=True
+        )
+        self._vision_thread.start()
+        self._enter_idle("startup")
+
+    def _build_actuator(self) -> None:
+        if self._mock:
+            self._actuator = MockActuator()
+        else:
+            self._actuator = SerialActuator(
+                port=self._cfg["actuator"]["port"], baud=self._cfg["actuator"]["baud"]
+            )
+        self._actuator.connect()
+
+    def _build_camera(self) -> None:
+        cam = self._cfg["camera"]
+        if self._mock:
+            self._camera = MockFrameSource(cam["width"], cam["height"])
+        else:
+            self._camera = UsbCameraSource(
+                device_index=cam["device_index"],
+                width=cam["width"],
+                height=cam["height"],
+                target_fps=cam["target_fps"],
+                use_mjpg=cam["use_mjpg"],
+            )
+        self._camera.start()
+
+    def _build_detector(self) -> None:
+        det = self._cfg["detector"]
+        if self._mock:
+            self._detector = ScriptedDetector([])
+            return
+        self._detector = UltralyticsDetector(
+            weights_path=det["weights"],
+            conf_threshold=det["conf_threshold"],
+            iou_threshold=det["iou_threshold"],
+            target_classes=det["target_classes"],
+            imgsz=det["imgsz"],
+            device=det["device"],
+        )
+
+    def _build_c2(self) -> None:
+        c2 = self._cfg["c2"]
+        if self._mock:
+            self._c2 = MockC2Client(auth_token=c2["auth_token"])
+        else:
+            self._c2 = C2Client(
+                broker_host=c2["broker_host"],
+                broker_port=c2["broker_port"],
+                node_id=self._cfg["node"]["id"],
+                auth_token=c2["auth_token"],
+            )
+        self._c2.connect()
+
+    def shutdown(self) -> None:
+        """De-energise, stop threads, release everything. Safe to call twice."""
+        logger.info("Shutting down")
+        self._running.clear()
+
+        # Effector first, always.
+        if self._actuator is not None:
             try:
-                rrl.startFrame()
-                # If there is no frame, skip the current frame processing
-                if global_data["curr_frame"] is not None:
-                    frame = global_data["curr_frame"].copy()
+                self._actuator.emergency_stop()
+                if not self._actuator.confirm_effector_off(timeout=0.5):
+                    logger.critical("COULD NOT CONFIRM EFFECTOR OFF during shutdown")
+            except ActuatorError as exc:
+                logger.critical("Actuator failed during shutdown: %s", exc)
 
-                if global_data["state"] == STATES.IDLE:
-                    audio_data = record_audio(source, recognizer, 2)
-                    if audio_data is None:
-                        continue
+        if self._vision_thread is not None and self._vision_thread.is_alive():
+            self._vision_thread.join(timeout=2.0)
 
-                    is_bird = predict_from_audio(audio_data, sound_model)
-                    if is_bird:
-                        print("bird")
-                        change_state(STATES.SCAN)
-                    else:
-                        print("no bird")
-                        pass
+        # Each component exposes its own teardown verb; a generic closer
+        # silently picked the wrong one and raised during shutdown.
+        for component, verb in (
+            (self._camera, "stop"),
+            (self._c2, "disconnect"),
+            (self._actuator, "close"),
+        ):
+            if component is None:
+                continue
+            try:
+                getattr(component, verb)()
+            except Exception as exc:  # noqa: BLE001 - teardown must not abort
+                logger.error("Error during %s.%s(): %s", type(component).__name__, verb, exc)
 
-                elif global_data["state"] == STATES.SCAN:
-                    # Check if we are relying on cloud for object detection
-                    if not global_data["server_processing"]:
-                        try:
-                            detections = yolov5.detect_objects(frame, conf_thres=0.4)
-                            # If object is found, change state to tracking
-                            if len(detections) > 0:
-                                change_state(STATES.TRACKING)
-                        except Exception as e:
-                            print(f"Error {e}")
-                            traceback.print_exc()
-                            change_state(STATES.QUIT)
-                
-                elif global_data["state"] == STATES.TRACKING:
-                    # If we are not relying on server for processing, do it here
-                    if not global_data["server_processing"]:
-                        board: BoardInterface = global_data["board"]
-                        try:
-                            detections = yolov5.detect_objects(frame, conf_thres=0.5)
+        logger.info("Latency at shutdown: %s", self._latency.summary())
 
-                            # If objects were found, find the coords of the closest one
-                            if len(detections) > 0:
-                                obj_center = get_closest_coords(global_data["cam_center"], detections)
+    # ---- vision worker ---------------------------------------------------
 
-                                # calculate displacement of obj from center
-                                # then normalize it so it is not some crazy large number
-                                dispX, dispY = get_object_displacement(obj_center, global_data["cam_center"], global_data["cam_size"])
-                                if abs(dispX) > 1:
-                                    threading.Thread(target=board.turn_servo_x, args=(-dispX,)).start()
-                                if abs(dispY) > 1:
-                                    threading.Thread(target=board.turn_servo_y, args=(dispY,)).start()
-                                
-                                global_data["last_bird_time"] = time.time()
-                        except Exception as e:
-                            traceback.print_exc()
-                            print(f"Error: {e}")
-                            change_state(STATES.QUIT)
-                
-                elif global_data["state"] == STATES.QUIT:
-                    break
+    def _vision_loop(self) -> None:
+        """Detect, track and solve; publish snapshots. Runs on vision-worker.
 
-                rrl.endFrame()
-                # print(f"Frame Rate: {1 / rrl.getDeltaTime():0.2f}")
-                # print(f"Delta Time: {rrl.getDeltaTime():0.2f}")
-            except Exception as e:
-                traceback.print_stack()
-                print(f"Error: {e}")
+        Decoupled from the tick loop so an 80 ms inference cannot delay a
+        fail-safe check. The state machine reads whatever the most recent
+        snapshot is and reasons about its age explicitly.
+        """
+        if self._camera is None or self._detector is None:
+            logger.critical("Vision worker started without dependencies; aborting")
+            return
 
-def init(server_processing=False, cam_resolution=256, send_image_data=True):
-    if send_image_data or server_processing:
-        MQTT_IPADDR = input("Input Server IP Address: ")
-    else:
-        print("Server not being used.")
+        last_frame_id = -1
+        while self._running.is_set():
+            frame, frame_id = self._camera.read()
+            if frame is None or frame_id == last_frame_id:
+                time.sleep(0.002)
+                continue
+            last_frame_id = frame_id
+            captured_at = time.monotonic()
 
-    # Set camera size
-    if cam_resolution not in [128, 160, 192, 224, 256]:
-        print("Camera resolution not supported. Defaulting to 192.")
-        cam_resolution = 224
-    global_data["cam_resolution"] = cam_resolution
-    global_data["cam_size"] = (cam_resolution, cam_resolution)
-    global_data["cam_center"] = (cam_resolution / 2, cam_resolution / 2)
-    global_data["server_processing"] = server_processing
+            try:
+                detections = self._detector.detect(frame)
+            except DetectorError as exc:
+                logger.error("Detector fault: %s", exc)
+                self._machine.force_idle(f"detector fault: {exc}")
+                time.sleep(0.1)
+                continue
 
-    # Load MQTT Connection
-    threading.Thread(target=thread_model, daemon=True).start()
-    try:
-        if send_image_data or server_processing:
-            # To see image output
-            global_data["mqtt_cam_feed"] = MQTT_Publisher(MQTT_IPADDR, MQTT_TOPIC_CAM)
-            global_data["mqtt_cam_feed"].loop_start()
+            center = self._camera.frame_center
+            target = select_priority_target(detections, center)
+            aim = self._solver.solve(target) if target is not None else None
+            error = error_magnitude(aim, center) if aim is not None else float("inf")
 
-        if server_processing:
-            # To tell server to start looking at images
-            global_data["mqtt_server_controls"] = MQTT_Publisher(MQTT_IPADDR, MQTT_TOPIC_SERVER_CONTROLS)
-            global_data["mqtt_server_controls"].loop_start()
+            self._snapshots.publish(
+                TrackSnapshot(
+                    frame_id=frame_id,
+                    captured_at=captured_at,
+                    processed_at=time.monotonic(),
+                    detections=tuple(detections),
+                    target=target,
+                    aim=aim,
+                    error_px=error,
+                )
+            )
 
-            # Rely on server for object detection
-            global_data["mqtt_cam_controls"] = MQTT_Subscriber(MQTT_IPADDR, MQTT_TOPIC_PI_ZERO_CONTROLS, cam_controls_callback)
-            global_data["mqtt_cam_controls"].loop_start()
+    # ---- main tick loop --------------------------------------------------
 
-    except Exception as e:
-        print(f"Failed to connect to MQTT Broker: {e}")
-        traceback.print_exc()
-        print("\nQuitting\n")
-        sys.exit()
+    def run(self) -> None:
+        """Tick the state machine until stopped."""
+        period = 1.0 / float(self._cfg["node"]["tick_hz"])
+        handlers = {
+            EngagementState.IDLE: self._tick_idle,
+            EngagementState.SCAN: self._tick_scan,
+            EngagementState.TRACK: self._tick_track,
+            EngagementState.HOLD: self._tick_hold,
+            EngagementState.OPERATOR_AUTH: self._tick_operator_auth,
+            EngagementState.ENGAGE: self._tick_engage,
+        }
 
-    # Load Board
-    try:
-        global_data["board"] = RaspberryPiZero2()
-        # global_data["board"] = Arduino("/dev/ttyACM0")
-    except Exception as e:
-        traceback.print_exc()
-        print(f"Error when loading board: {e}")
-        print("\nQuitting\n")
-        sys.exit()
+        while self._running.is_set():
+            tick_start = time.monotonic()
+            try:
+                self._check_liveness()
+                handlers[self._machine.state]()
+            except IllegalTransitionError as exc:
+                logger.error("Illegal transition: %s", exc)
+                self._enter_idle(f"illegal transition: {exc}")
+            except ActuatorError as exc:
+                logger.error("Actuator fault: %s", exc)
+                self._enter_idle(f"actuator fault: {exc}")
+            except Exception as exc:  # noqa: BLE001 - top-level guard
+                # De-energise FIRST, then handle. Guardrails section 2, HARD.
+                logger.critical("Unhandled fault in tick: %s", exc, exc_info=True)
+                self._enter_idle(f"unhandled fault: {exc}")
 
-    # Picam
-    try:
-        global_data["picam"] = PiCameraInterface((cam_resolution, cam_resolution))
-        global_data["picam"].start()
-    except Exception as e:
-        print(f"Error starting PiCamera: {e}")
-        traceback.print_exc()
-        print("\nQuitting\n")
-        sys.exit()
+            elapsed = time.monotonic() - tick_start
+            if elapsed < period:
+                time.sleep(period - elapsed)
 
-def change_state(nextState: int):
-    global_data['state'] = nextState
-    board: BoardInterface = global_data["board"]
-    server_processing = global_data["server_processing"]
+    def _check_liveness(self) -> None:
+        """Fault to IDLE on loss of any subsystem while past IDLE."""
+        if self._machine.state is EngagementState.IDLE:
+            return
+        if self._c2 is not None and not self._c2.is_connected:
+            self._enter_idle("C2 link lost")
+        elif isinstance(self._actuator, SerialActuator) and not self._actuator.is_healthy:
+            self._enter_idle("serial link lost")
+        elif isinstance(self._camera, UsbCameraSource) and not self._camera.is_healthy:
+            self._enter_idle("camera lost")
 
-    if nextState == STATES.IDLE:
-        print("Entering State Idle")
-        board.set_laser(0)
+    # ---- state handlers --------------------------------------------------
 
-        # If relying on cloud for computation, tell server to stop detecting objects
-        mqtt_server_controls: MQTT_Publisher = global_data["mqtt_server_controls"]
-        if server_processing:
-            mqtt_server_controls.send("auto:0")
-    
-    elif nextState == STATES.SCAN:
-        print("Entering State Scan")
-        board.set_laser(0)
+    def _tick_idle(self) -> None:
+        """Await a validated radar cue."""
+        message = self._c2.poll()
+        if not isinstance(message, SlewToCue):
+            return
 
-        # global_data["scan_dir_x"] = True
-        # global_data["scan_dir_y"] = False
-        global_data["last_bird_time"] = time.time()
+        gimbal = cue_to_gimbal(
+            message.azimuth,
+            message.elevation,
+            boresight_az_deg=self._cfg["scan"]["boresight_azimuth_deg"],
+        )
+        if gimbal is None:
+            self._c2.publish_event(
+                "cue_rejected",
+                {"target_id": message.target_id, "reason": "outside gimbal arc"},
+            )
+            return
 
-        # If relying on cloud, tell server to start sending turn orders based on model detected
-        mqtt_server_controls: MQTT_Publisher = global_data["mqtt_server_controls"]
-        if server_processing:
-            mqtt_server_controls.send("auto:1")
+        pan, tilt = gimbal
+        self._active_target_id = message.target_id
+        self._sweep.reset(pan, tilt)
+        self._command_gimbal(pan, tilt)
+        self._machine.transition_to(
+            EngagementState.SCAN,
+            f"cue {message.target_id} az={message.azimuth:.1f} el={message.elevation:.1f}",
+        )
+
+    def _tick_scan(self) -> None:
+        """Sweep the cued volume looking for a visual lock."""
+        snapshot = self._snapshots.latest()
+        if snapshot is not None and snapshot.has_target:
+            self._begin_track(snapshot)
+            return
+
+        if self._machine.time_in_state > self._cfg["engagement"]["scan_timeout_s"]:
+            self._enter_idle("scan timeout, no visual acquired")
+            return
+        if self._sweep.exhausted:
+            self._enter_idle(f"search volume covered {self._sweep.cycles_completed}x")
+            return
+
+        pan, tilt = self._sweep.step()
+        self._command_gimbal(pan, tilt)
+
+    def _tick_track(self) -> None:
+        """Drive the aimpoint to boresight."""
+        snapshot = self._drive_to_target()
+        if snapshot is None:
+            return
+        if snapshot.error_px <= self._cfg["engagement"]["hold_error_px"]:
+            self._hold_started_at = time.monotonic()
+            self._machine.transition_to(
+                EngagementState.HOLD, f"error {snapshot.error_px:.1f}px inside band"
+            )
+
+    def _tick_hold(self) -> None:
+        """Hold the aimpoint inside the error band for the required duration."""
+        snapshot = self._drive_to_target()
+        if snapshot is None:
+            self._hold_started_at = None
+            return
+
+        # Any excursion resets the timer. It never accumulates across breaks
+        # (guardrails section 6). An identity switch is also an excursion: a new
+        # track id is a different object until proven otherwise.
+        if snapshot.error_px > self._cfg["engagement"]["hold_error_px"]:
+            self._hold_started_at = None
+            self._machine.transition_to(
+                EngagementState.TRACK, f"error {snapshot.error_px:.1f}px left band"
+            )
+            return
+        if snapshot.aim is not None and snapshot.aim.track_id != self._active_track_id:
+            self._hold_started_at = None
+            self._active_track_id = snapshot.aim.track_id
+            self._machine.transition_to(EngagementState.TRACK, "track identity switched")
+            return
+
+        if self._hold_started_at is None:
+            self._hold_started_at = time.monotonic()
+            return
+
+        held = time.monotonic() - self._hold_started_at
+        if held >= self._cfg["engagement"]["hold_duration_s"]:
+            self._publish_firing_solution(snapshot, held)
+            self._machine.transition_to(
+                EngagementState.OPERATOR_AUTH, f"held {held:.2f}s within band"
+            )
+
+    def _tick_operator_auth(self) -> None:
+        """Await the operator decision. Keep tracking — the target does not wait."""
+        snapshot = self._drive_to_target()
+        if snapshot is None:
+            return
+
+        if self._machine.time_in_state > self._cfg["engagement"]["auth_timeout_s"]:
+            self._machine.transition_to(EngagementState.TRACK, "operator auth timed out")
+            return
+
+        message = self._c2.poll()
+        if not isinstance(message, OperatorAuth):
+            return
+
+        if message.nonce in self._consumed_nonces:
+            logger.warning("Replayed auth nonce %s rejected", message.nonce)
+            return
+        self._consumed_nonces.add(message.nonce)
+
+        if message.target_id != self._active_target_id:
+            logger.warning(
+                "Auth for %s does not match active target %s; rejected",
+                message.target_id, self._active_target_id,
+            )
+            return
+
+        if not message.auth:
+            self._enter_idle(f"operator DENIED engagement on {message.target_id}")
+            return
+
+        self._begin_engagement(snapshot)
+
+    def _tick_engage(self) -> None:
+        """Burn for the configured duration, tracking throughout."""
+        if self._burn_started_at is None:
+            self._end_engagement("burn state entered without a start time")
+            return
+
+        elapsed = time.monotonic() - self._burn_started_at
+        snapshot = self._snapshots.latest()
+
+        # Lock loss during a burn cuts the beam immediately. Do not coast.
+        if snapshot is None or not snapshot.has_target:
+            self._end_engagement(f"lock lost {elapsed:.2f}s into burn")
+            return
+
+        self._drive_to_target()
+        self._engagement_metrics["peak_error_px"] = max(
+            self._engagement_metrics.get("peak_error_px", 0.0), snapshot.error_px
+        )
+        self._engagement_metrics["samples"] = self._engagement_metrics.get("samples", 0) + 1
+        self._engagement_metrics["error_sum"] = (
+            self._engagement_metrics.get("error_sum", 0.0) + snapshot.error_px
+        )
+
+        if elapsed >= self._cfg["engagement"]["burn_duration_s"]:
+            self._end_engagement(f"burn complete at {elapsed:.2f}s")
+
+    # ---- shared mechanics ------------------------------------------------
+
+    def _drive_to_target(self) -> Optional[TrackSnapshot]:
+        """Command the gimbal toward the predicted aimpoint.
+
+        Returns:
+            The snapshot acted on, or None if the target is missing — in which
+            case this method has already handled the track-loss transition.
+        """
+        snapshot = self._snapshots.latest()
+        now = time.monotonic()
+
+        if snapshot is None or not snapshot.has_target or snapshot.aim is None:
+            if now - self._last_target_seen > self._cfg["engagement"]["track_loss_timeout_s"]:
+                if self._machine.state is not EngagementState.SCAN:
+                    self._predictor.reset()
+                    self._hold_started_at = None
+                    self._machine.transition_to(
+                        EngagementState.SCAN, "target lost, reacquiring"
+                    )
+            return None
+
+        self._last_target_seen = now
+        self._active_track_id = snapshot.aim.track_id
+        self._predictor.update(snapshot.aim, snapshot.processed_at)
+        # Sample latency for every processed snapshot, not only for those that
+        # produce a command: a target sitting inside the deadband would
+        # otherwise never update the estimate that drives lead prediction.
+        self._latency.record(snapshot.captured_at, now)
+
+        predicted = self._predictor.predict(self._latency.total_lead_s)
+        aim_x, aim_y = predicted if predicted is not None else (snapshot.aim.x, snapshot.aim.y)
+
+        cx, cy = self._camera.frame_center
+        error_x, error_y = aim_x - cx, aim_y - cy
+
+        deadband = self._cfg["control"]["deadband_px"]
+        if abs(error_x) < deadband and abs(error_y) < deadband:
+            return snapshot
+
+        gain = self._cfg["control"]["proportional_gain"]
+        max_step = self._cfg["control"]["max_step_deg"]
+        # Pan increases to the right; tilt is inverted because image y grows
+        # downward while elevation grows upward.
+        delta_pan = _clamp(error_x * self._deg_per_px * gain, -max_step, max_step)
+        delta_tilt = _clamp(-error_y * self._deg_per_px * gain, -max_step, max_step)
+
+        self._command_gimbal(self._commanded[0] + delta_pan, self._commanded[1] + delta_tilt)
+        return snapshot
+
+    def _command_gimbal(self, pan: float, tilt: float) -> None:
+        """Send absolute angles. Clamped in the driver AND again in firmware."""
+        self._actuator.set_angles(pan, tilt)
+        status = self._actuator.last_status()
+        self._commanded = (status.pan, status.tilt) if status is not None else (pan, tilt)
+
+    def _begin_track(self, snapshot: TrackSnapshot) -> None:
+        self._last_target_seen = time.monotonic()
+        self._active_track_id = snapshot.aim.track_id if snapshot.aim else None
+        self._predictor.reset()
+        self._machine.transition_to(
+            EngagementState.TRACK,
+            f"visual acquired, {len(snapshot.detections)} detection(s)",
+        )
+
+    def _begin_engagement(self, snapshot: TrackSnapshot) -> None:
+        """Arm, energise, start the burn clock."""
+        self._actuator.arm()
+        self._actuator.set_effector(True)
+        self._burn_started_at = time.monotonic()
+        self._engagement_metrics = {
+            "target_id": self._active_target_id,
+            "track_id": self._active_track_id,
+            "started_at": self._burn_started_at,
+            "lead_ms": self._latency.total_lead_s * 1000.0,
+        }
+        self._machine.transition_to(
+            EngagementState.ENGAGE, f"operator AUTHORISED {self._active_target_id}"
+        )
+
+    def _end_engagement(self, reason: str) -> None:
+        """De-energise, confirm, log metrics, return to IDLE."""
+        elapsed = time.monotonic() - self._burn_started_at if self._burn_started_at else 0.0
+        self._actuator.set_effector(False)
+        self._actuator.disarm()
+
+        if not self._actuator.confirm_effector_off(timeout=0.5):
+            logger.critical("EFFECTOR OFF NOT CONFIRMED after burn — treating as fault")
+
+        samples = self._engagement_metrics.get("samples", 0)
+        metrics = {
+            **self._engagement_metrics,
+            "reason": reason,
+            "time_on_target_s": round(elapsed, 3),
+            "mean_error_px": round(
+                self._engagement_metrics.get("error_sum", 0.0) / samples, 2
+            ) if samples else None,
+            "peak_error_px": round(self._engagement_metrics.get("peak_error_px", 0.0), 2),
+            "measured_compute_latency_ms": round(self._latency.compute_latency_s * 1000.0, 1),
+        }
+        logger.info("ENGAGEMENT COMPLETE: %s", metrics)
+        self._c2.publish_event("engagement_complete", metrics)
+
+        self._burn_started_at = None
+        self._enter_idle(reason)
+
+    def _enter_idle(self, reason: str) -> None:
+        """Universal safe harbour. Never raises — every fault path ends here."""
+        try:
+            if self._actuator is not None:
+                self._actuator.set_effector(False)
+                self._actuator.disarm()
+                self._actuator.set_angles(
+                    self._cfg["actuator"]["stow_pan_deg"],
+                    self._cfg["actuator"]["stow_tilt_deg"],
+                )
+        except ActuatorError as exc:
+            logger.critical(
+                "Could not safe the actuator entering IDLE: %s. Firmware deadman "
+                "will cut the effector within its window.", exc,
+            )
+
+        self._hold_started_at = None
+        self._burn_started_at = None
+        self._active_track_id = None
+        self._active_target_id = None
+        self._predictor.reset()
+        self._snapshots.clear()
+        if self._detector is not None:
+            self._detector.reset()
+        if self._c2 is not None:
+            self._c2.drain()
+
+        if self._machine.state is EngagementState.IDLE:
+            return
+        # Prefer the declared transition so the audit trail distinguishes a
+        # nominal return to IDLE from a fault. force_idle is the fault path.
+        try:
+            self._machine.transition_to(EngagementState.IDLE, reason)
+        except IllegalTransitionError:
+            self._machine.force_idle(reason)
+
+    def _publish_firing_solution(self, snapshot: TrackSnapshot, held: float) -> None:
+        aim = snapshot.aim
+        self._c2.publish_event(
+            "firing_solution",
+            {
+                "target_id": self._active_target_id,
+                "track_id": aim.track_id if aim else None,
+                "error_px": round(snapshot.error_px, 2),
+                "hold_s": round(held, 2),
+                "aimpoint_downgraded": aim.downgraded if aim else None,
+                "aimpoint_reason": aim.reason if aim else None,
+                "lead_ms": round(self._latency.total_lead_s * 1000.0, 1),
+                "target_speed_px_s": round(self._predictor.speed_px_s, 1),
+            },
+        )
+
+    def _publish_transition(self, transition: Transition) -> None:
+        """StateMachine callback. Must not block — publish is QoS 1, non-blocking."""
+        if self._c2 is None:
+            return
+        self._c2.publish_event(
+            "state_transition",
+            {
+                "from": transition.from_state.value,
+                "to": transition.to_state.value,
+                "reason": transition.reason,
+            },
+        )
+
+    @property
+    def state(self) -> EngagementState:
+        return self._machine.state
+
+    def stop(self) -> None:
+        self._running.clear()
 
 
-    elif nextState == STATES.TRACKING:
-        print("Entering State Tracking")
-        board.set_laser(1)
-        global_data["last_bird_time"] = time.time()
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
 
-    elif nextState == STATES.QUIT:
-        print("Entering State Quit")
-        board.set_laser(0)
-        global_data["is_running"] = False
 
-def idle():
-    """Listens for birds. If bird detected, switch to scan state"""
-    pass
+def load_config(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
 
-def scan():
-    """Constantly rotates in the x axis"""
-    # Go back to idle state if no bird is detected for a period of time
-    last_bird_time = global_data["last_bird_time"]
-    current_time = time.time()
-    if current_time - last_bird_time > 60:
-        change_state(STATES.IDLE)
-    # Turn x servo, y will be handled in scan_handle_x function
-    scan_handle_x(global_data["board"], global_data, servo_turn_rate_x=2, servo_turn_rate_y=8)
 
-def tracking():
-    # Go back to idle state if no bird is detected for a period of time
-    last_bird_time = global_data["last_bird_time"]
-    current_time = time.time()
-    if current_time - last_bird_time > 15:
-        change_state(STATES.IDLE)
-
-if __name__ == "__main__":
-    # Check for CLI arguments
-    parser = argparse.ArgumentParser(description="Run object detection with local or server processing.")
-    parser.add_argument("--server", choices=["true", "false"], required=True,
-                        help="Whether to use server-side object detection (true/false)")
-    parser.add_argument("--cam-size", type=int, required=True,
-                        help="Camera resolution (128, 160, 192, 224, 256)")
-    parser.add_argument("--send-image", choices=["true", "false"], required=True,
-                        help="Whether to send image data to the server via MQTT (true/false)")
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="config/bench.yaml")
+    parser.add_argument("--mock", action="store_true", help="Run with no hardware")
+    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    # Convert string inputs to booleans
-    use_server = args.server.lower() == "true"
-    send_image = args.send_image.lower() == "true"
-    init(server_processing=use_server, cam_resolution=args.cam_size, send_image_data=send_image)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
-    # FPSLimiter controls the number of 5
-    rrl = FPSLimiter(6)
+    node = KillswitchNode(load_config(args.config), mock=args.mock)
 
-    # Initialize State Machine
-    change_state(STATES.IDLE)
+    def handle_signal(signum, _frame):
+        logger.info("Signal %d received, stopping", signum)
+        node.stop()
 
-    # Main Loop
-    while global_data["is_running"]:
-        try:
-            rrl.startFrame()
-            currState: int = global_data["state"]
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
 
-            # Get the picam view for this frame
-            handle_picam(global_data)
+    try:
+        node.start()
+        node.run()
+    except (RuntimeError, ActuatorError, ConnectionError) as exc:
+        logger.critical("Fatal: %s", exc)
+        return 1
+    finally:
+        node.shutdown()
+    return 0
 
-            if currState == STATES.IDLE:
-                idle()
-            elif currState == STATES.SCAN:
-                scan()
-            elif currState == STATES.TRACKING:
-                tracking()
-            elif currState == STATES.QUIT:
-                global_data["is_running"] = False
-                break
 
-            rrl.endFrame()
-        except Exception as e:
-            print(f"Error: {e}")
-            traceback.print_exc()
-            change_state(STATES.QUIT)
-        except KeyboardInterrupt as e:
-            print(f"Error: {e}")
-            change_state(STATES.QUIT)
-        
-        # print(f"Frame Rate: {1 / rrl.getDeltaTime():0.2f}")
-
-    global_data["board"].close()
-    
-    if global_data["mqtt_cam_feed"] is not None:
-        global_data["mqtt_cam_feed"].loop_stop()
-    if global_data["mqtt_cam_controls"] is not None:
-        global_data["mqtt_cam_controls"].loop_stop()
-    if global_data["mqtt_server_controls"] is not None:
-        global_data["mqtt_server_controls"].loop_stop()
-    
+if __name__ == "__main__":
+    sys.exit(main())
