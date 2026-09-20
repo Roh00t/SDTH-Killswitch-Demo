@@ -1,12 +1,113 @@
-venv/
+# ─── Python ──────────────────────────────────────────────────────────────────
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
 
-model/yolov5mu.pt
-model/yolov5nu.pt
-model/yolov5su.pt
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
 
-sound/data/bird/
-sound/data/combined/
-sound/data/no_bird/
-sound/bird_sound_model.onnx
-sound/bird_sound_model.pth
+# Environment & secrets  (MQTT creds, broker IPs, auth tokens — never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+secrets.yaml
+config/local.yaml
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# ─── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ─── Editors ─────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# ─── ML weights & exports ────────────────────────────────────────────────────
+# Trained on Google Colab; distribute via release artifacts, not git.
+# Keep model/README.md documenting expected filenames, provenance and metrics.
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+*.weights
+*.mlmodel
+!model/README.md
+
+# Ultralytics training output
+runs/
+wandb/
+yolo*.pt
+*.yaml.bak
+
+# ─── Datasets & captures ─────────────────────────────────────────────────────
+datasets/
+data/raw/
+data/processed/
+data/augmented/
+*.tfrecord
+*.npy
+*.npz
+
+# Frame captures & recordings from test runs
+captures/
+recordings/
+*.mp4
+*.avi
+*.mov
+*.mkv
+# Keep curated demo/reference imagery only
+!docs/**/*.png
+!docs/**/*.jpg
+!image/**
+
+# ─── Logs & telemetry ────────────────────────────────────────────────────────
+logs/
+*.log
+telemetry/
+benchmarks/*.json
+engagement_logs/
+*.csv
+!docs/**/*.csv
+
+# ─── Embedded / ESP32 firmware ───────────────────────────────────────────────
+.pio/
+.pioenvs/
+.piolibdeps/
+firmware/**/build/
+firmware/**/.vscode/
+*.bin
+*.elf
+*.map
+sdkconfig
+sdkconfig.old
+managed_components/
