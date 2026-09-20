@@ -58,12 +58,14 @@ def run_checks(port: str) -> int:
         check("effector de-energised at boot", status is not None and not status.laser_on)
         check("disarmed at boot", status is not None and not status.armed)
 
-        print("\nGimbal (watch the servos move)")
+        print("\nGimbal (COMMANDED angle only — SG90s have no position feedback,")
+        print("       so this passes even with no servos attached. Use")
+        print("       'serial_probe --servo-sweep' to confirm physical motion.)")
         for pan, tilt in ((60.0, 70.0), (120.0, 110.0), (90.0, 90.0)):
             actuator.set_angles(pan, tilt)
             time.sleep(0.8)
         s = actuator.last_status()
-        check("gimbal returned to stow", s is not None and abs(s.pan - 90.0) < 6.0)
+        check("firmware echoed the stow command", s is not None and abs(s.pan - 90.0) < 6.0)
 
         print("\nBounds (commands are clamped, not wrapped)")
         actuator.set_angles(999.0, -999.0)
@@ -98,14 +100,24 @@ def run_checks(port: str) -> int:
         time.sleep(2.6)
         check("firmware cut the burn at its ceiling", actuator.confirm_effector_off())
 
-        print("\nDeadman (heartbeat suppressed for 0.6s)")
+        print("\nDeadman (heartbeat suppressed for 0.6s — LED should die on its own)")
         actuator.arm()
         actuator.set_effector(True)
         time.sleep(0.15)
-        actuator._running.clear()          # stop the heartbeat, simulating a dead host
+        lit = actuator.last_status()
+        check("effector lit before suspending heartbeat",
+              lit is not None and lit.laser_on)
+        # Suspend ONLY the heartbeat. Stopping _running would also stop the
+        # reader, so the firmware would cut the effector and we would never see
+        # the status frame proving it.
+        actuator.suspend_heartbeat()
         time.sleep(0.6)
         s = actuator.last_status()
-        check("deadman cut the effector", s is not None and not s.laser_on)
+        check("deadman cut the effector", s is not None and not s.laser_on,
+              f"(status {s})")
+        check("deadman also disarmed", s is not None and not s.armed)
+        actuator.resume_heartbeat()
+        time.sleep(0.2)
 
         print(f"\n{passed} passed, {failed} failed")
         if failed == 0:
@@ -119,12 +131,88 @@ def run_checks(port: str) -> int:
         actuator.close()
 
 
+def servo_sweep(port: str) -> int:
+    """Large, slow, obvious movements. YOU are the sensor here.
+
+    SG90s report nothing, so the only way to confirm the gimbal physically
+    moves is to watch it. This isolates each axis so a wiring or power fault
+    points at one servo rather than the whole rig.
+    """
+    actuator = SerialActuator(port, baud=BAUD_RATE)
+    try:
+        actuator.connect()
+        print("\nWatch the gimbal. Each move is deliberately large and slow.\n")
+
+        def move(label: str, pan: float, tilt: float, hold: float = 1.6) -> None:
+            print(f"  {label:<38}", end="", flush=True)
+            actuator.set_angles(pan, tilt)
+            time.sleep(hold)
+            s = actuator.last_status()
+            print(f"commanded pan={s.pan:5.1f} tilt={s.tilt:5.1f}" if s else "no status")
+
+        print("PAN axis (GPIO 5) — should swing left/right")
+        move("centre", 90.0, 90.0)
+        move("pan hard left  (0 deg)", 5.0, 90.0, 2.5)
+        move("pan hard right (180 deg)", 175.0, 90.0, 3.0)
+        move("pan centre", 90.0, 90.0, 2.5)
+
+        print("\nTILT axis (GPIO 6) — should tip up/down")
+        move("tilt down (45 deg)", 90.0, 48.0, 2.5)
+        move("tilt up   (135 deg)", 90.0, 132.0, 3.0)
+        move("tilt centre", 90.0, 90.0, 2.5)
+
+        print("\nBOTH axes together")
+        move("diagonal A", 40.0, 60.0, 2.5)
+        move("diagonal B", 140.0, 120.0, 3.0)
+        move("stow", 90.0, 90.0, 2.5)
+
+        print("""
+--- What you just saw tells you where the fault is ---
+
+BOTH axes moved smoothly
+    Gimbal is good. Nothing to fix.
+
+NOTHING moved, no sound at all
+    No power reaching the servos. This is the usual cause.
+    - Servo V+ (red) must go to a SEPARATE 5V supply, not the ESP32 3V3 pin.
+    - That supply's GND must be tied to an ESP32 GND pin. Without a common
+      ground the PWM signal has no reference and the servo ignores it.
+    - Check the supply is switched on and the barrel/USB connector is seated.
+
+NOTHING moved but you hear buzzing or feel the horn straining
+    Power is present but sagging. Two SG90s stall-draw ~700mA each.
+    - A phone charger rated under 2A will brown out under load.
+    - Check for a loose ground or thin jumper wire on the V+ run.
+
+ONE axis moved, the other did not
+    That axis alone is at fault: signal wire, the servo itself, or the pin.
+    - Pan signal (orange/yellow) -> GPIO 5, Tilt -> GPIO 6.
+    - Swap the two signal wires. If the fault follows the wire it is wiring;
+      if it stays on the same axis it is that servo or that GPIO.
+
+Movement is jerky or it jumps to an end stop and sticks
+    Likely a pulse-width mismatch. Adjust SERVO_MIN_US / SERVO_MAX_US in
+    firmware/esp32_actuator/esp32_actuator.ino (currently 500-2400us) and
+    reflash.
+""")
+        return 0
+    except ActuatorError as exc:
+        print(f"\nACTUATOR ERROR: {exc}")
+        return 1
+    finally:
+        actuator.close()
+
+
 def interactive(port: str) -> int:
     """Manual command shell. Type raw protocol bodies; 'q' exits."""
     actuator = SerialActuator(port, baud=BAUD_RATE)
     try:
         actuator.connect()
-        print("\nCommands: a <pan> <tilt> | arm | disarm | on | off | z | s | q\n")
+        print("\nCommands:")
+        print("  a <pan> <tilt>  absolute angles      d   firmware PWM diagnostics")
+        print("  arm / disarm    arming interlock     t   RAW sweep (bypasses slew")
+        print("  on / off        effector                 limiting and deadband)")
+        print("  z               e-stop               s   status      q  quit\n")
         while True:
             try:
                 parts = input("> ").strip().split()
@@ -150,6 +238,13 @@ def interactive(port: str) -> int:
                     actuator.emergency_stop()
                 elif verb == "s":
                     print(f"  {actuator.last_status()}")
+                elif verb == "d":
+                    actuator.send_raw("D")
+                    time.sleep(0.4)   # let the reader surface the DIAG line
+                elif verb == "t":
+                    print("  raw sweep — watch the gimbal for ~2s")
+                    actuator.send_raw("T")
+                    time.sleep(2.5)
                 else:
                     print("  ?")
             except (ActuatorError, ValueError) as exc:
@@ -164,12 +259,16 @@ def main() -> int:
     parser.add_argument("--port", help="Serial device path")
     parser.add_argument("--list", action="store_true", help="List serial ports")
     parser.add_argument("--interactive", action="store_true", help="Manual shell")
+    parser.add_argument("--servo-sweep", action="store_true",
+                        help="Large slow movements to confirm the gimbal physically moves")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     if args.list or not args.port:
         return list_ports()
+    if args.servo_sweep:
+        return servo_sweep(args.port)
     return interactive(args.port) if args.interactive else run_checks(args.port)
 
 

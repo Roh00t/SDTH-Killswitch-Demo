@@ -122,7 +122,12 @@ class C2Client:
         try:
             self._client.connect(host, port, keepalive=self._keepalive)
         except (OSError, ValueError) as exc:
-            raise ConnectionError(f"Could not reach broker {host}:{port}: {exc}") from exc
+            raise ConnectionError(
+                f"Could not reach broker {host}:{port}: {exc}. Start it with "
+                f"'/opt/homebrew/opt/mosquitto/sbin/mosquitto -v' (macOS) or "
+                f"'sudo systemctl start mosquitto' (Linux), and leave it running "
+                f"in its own terminal."
+            ) from exc
 
         self._client.loop_start()
         if not self._connected.wait(timeout=timeout):

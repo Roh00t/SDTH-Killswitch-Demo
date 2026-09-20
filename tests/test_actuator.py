@@ -150,3 +150,61 @@ class TestAuditTrail:
         with pytest.raises(ActuatorError):
             actuator.set_effector(True)
         assert "fire while disarmed" in actuator.rejections
+
+
+class TestPortResolution:
+    """macOS renumbers /dev/cu.usbserial-<n> between plugs, so a hardcoded
+    port is a guaranteed failure at the worst moment."""
+
+    def test_explicit_path_is_passed_through_untouched(self):
+        from helper.hardware.actuator import resolve_port
+
+        assert resolve_port("/dev/cu.usbserial-130") == "/dev/cu.usbserial-130"
+        assert resolve_port("COM3") == "COM3"
+
+    def test_auto_picks_the_single_bridge(self, monkeypatch):
+        from helper.hardware import actuator as mod
+
+        class FakePort:
+            def __init__(self, device, description):
+                self.device, self.description = device, description
+
+        fake = [
+            FakePort("/dev/cu.Bluetooth-Incoming-Port", "n/a"),
+            FakePort("/dev/cu.usbserial-130", "CP2102N USB to UART Bridge Controller"),
+        ]
+        monkeypatch.setattr(
+            "serial.tools.list_ports.comports", lambda: fake, raising=False
+        )
+        assert mod.resolve_port("auto") == "/dev/cu.usbserial-130"
+
+    def test_auto_raises_when_no_bridge_present(self, monkeypatch):
+        from helper.hardware import actuator as mod
+
+        class FakePort:
+            def __init__(self, device, description):
+                self.device, self.description = device, description
+
+        monkeypatch.setattr(
+            "serial.tools.list_ports.comports",
+            lambda: [FakePort("/dev/cu.debug-console", "n/a")], raising=False,
+        )
+        with pytest.raises(ActuatorError, match="no USB-UART bridge"):
+            mod.resolve_port("auto")
+
+    def test_auto_refuses_to_guess_between_two_boards(self, monkeypatch):
+        from helper.hardware import actuator as mod
+
+        class FakePort:
+            def __init__(self, device, description):
+                self.device, self.description = device, description
+
+        monkeypatch.setattr(
+            "serial.tools.list_ports.comports",
+            lambda: [
+                FakePort("/dev/cu.usbserial-130", "CP2102N USB to UART Bridge"),
+                FakePort("/dev/cu.wchusbserial-20", "CH340 USB to UART"),
+            ], raising=False,
+        )
+        with pytest.raises(ActuatorError, match="ambiguous"):
+            mod.resolve_port("auto")

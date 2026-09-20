@@ -75,7 +75,11 @@ scan:
   boresight_azimuth_deg: 0.0
 
 actuator:
-  port: "/dev/cu.usbserial-0001"   # UART bridge, NOT native USB-CDC.
+  # "auto" finds the USB-UART bridge by description. macOS hands out
+  # /dev/cu.usbserial-<n> where <n> changes between plugs, so hardcoding it
+  # guarantees a failure at the worst possible moment. Override with an
+  # explicit path only if two boards are attached.
+  port: "auto"
   baud: 921600
   stow_pan_deg: 90.0
   stow_tilt_deg: 90.0

@@ -79,6 +79,11 @@ static float currentTilt = STOW_TILT;
 
 static bool armed        = false;
 static bool effectorOn   = false;
+// ESP32Servo::attach() returns the LEDC channel, or 0 on failure. Unchecked,
+// a failed attach produces firmware that answers every command correctly and
+// never emits a PWM pulse — silent servos with no error anywhere.
+static int  panChannel   = 0;
+static int  tiltChannel  = 0;
 static bool estopLatched = true;   // Boot latched. An explicit arm is required.
 static bool deadmanFired = false;
 
@@ -205,6 +210,36 @@ static void handleCommand(char* line, size_t length) {
       lastCommandMs = millis();
       lastStatusMs = 0;  // force a status frame on the next loop
       return;
+
+    case 'D': {  // diagnostics — is PWM actually being generated?
+      lastCommandMs = millis();
+      Serial.print("DIAG pan_pin="); Serial.print(PIN_SERVO_PAN);
+      Serial.print(" pan_ch=");      Serial.print(panChannel);
+      Serial.print(" pan_attached="); Serial.print(servoPan.attached() ? 1 : 0);
+      Serial.print(" tilt_pin=");    Serial.print(PIN_SERVO_TILT);
+      Serial.print(" tilt_ch=");     Serial.print(tiltChannel);
+      Serial.print(" tilt_attached=");Serial.print(servoTilt.attached() ? 1 : 0);
+      Serial.print(" us_range=");    Serial.print(SERVO_MIN_US);
+      Serial.print("-");             Serial.println(SERVO_MAX_US);
+      return;
+    }
+
+    case 'T': {  // raw sweep, bypassing slew limiting and the deadband
+      lastCommandMs = millis();
+      Serial.println("OK T raw sweep starting");
+      for (int angle = 20; angle <= 160; angle += 10) {
+        servoPan.write(angle);
+        servoTilt.write(constrain(angle, (int)TILT_MIN, (int)TILT_MAX));
+        delay(120);
+      }
+      servoPan.write((int)STOW_PAN);
+      servoTilt.write((int)STOW_TILT);
+      currentPan = targetPan = STOW_PAN;
+      currentTilt = targetTilt = STOW_TILT;
+      lastCommandMs = millis();
+      Serial.println("OK T raw sweep done");
+      return;
+    }
 
     case 'A': {
       float pan, tilt;
@@ -373,8 +408,8 @@ void setup() {
   ESP32PWM::allocateTimer(1);
   servoPan.setPeriodHertz(50);
   servoTilt.setPeriodHertz(50);
-  servoPan.attach(PIN_SERVO_PAN,   SERVO_MIN_US, SERVO_MAX_US);
-  servoTilt.attach(PIN_SERVO_TILT, SERVO_MIN_US, SERVO_MAX_US);
+  panChannel  = servoPan.attach(PIN_SERVO_PAN,   SERVO_MIN_US, SERVO_MAX_US);
+  tiltChannel = servoTilt.attach(PIN_SERVO_TILT, SERVO_MIN_US, SERVO_MAX_US);
 
   servoPan.write((int)STOW_PAN);
   servoTilt.write((int)STOW_TILT);
@@ -383,7 +418,17 @@ void setup() {
   estopLatched  = true;
   lastCommandMs = millis();
 
-  Serial.println("OK BOOT killswitch-actuator v1");
+  // Report PWM attach state at boot. A failed attach is otherwise invisible:
+  // every command still succeeds, no pulses are ever emitted.
+  Serial.print("OK BOOT killswitch-actuator v2 pan_ch=");
+  Serial.print(panChannel);
+  Serial.print(" tilt_ch=");
+  Serial.print(tiltChannel);
+  if (panChannel == 0 || tiltChannel == 0) {
+    Serial.println(" SERVO ATTACH FAILED - NO PWM WILL BE GENERATED");
+  } else {
+    Serial.println(" pwm=ok");
+  }
 }
 
 void loop() {

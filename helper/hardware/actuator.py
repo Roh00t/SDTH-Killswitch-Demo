@@ -29,6 +29,58 @@ class ActuatorError(RuntimeError):
     """Actuator fault. Callers transition to IDLE with the effector de-energised."""
 
 
+# USB-UART bridge chips used on ESP32 devkits. Matched against the port
+# description so the node survives the port number changing between plugs —
+# macOS hands out /dev/cu.usbserial-<n> where <n> is not stable.
+_BRIDGE_HINTS = ("CP210", "CH340", "CH910", "FT232", "SLAB", "USB to UART", "USB-Serial")
+
+
+def resolve_port(requested: str) -> str:
+    """Resolve a configured port, auto-detecting when asked.
+
+    Args:
+        requested: A device path, or "auto" to search for a USB-UART bridge.
+
+    Returns:
+        A concrete device path.
+
+    Raises:
+        ActuatorError: If "auto" was requested and no bridge was found, or more
+            than one was found (ambiguous — name it explicitly rather than
+            guessing which board to drive).
+    """
+    if requested.lower() != "auto":
+        return requested
+
+    try:
+        from serial.tools import list_ports
+    except ImportError as exc:
+        raise ActuatorError("pyserial not installed") from exc
+
+    candidates = [
+        port for port in list_ports.comports()
+        if any(hint.lower() in (port.description or "").lower() for hint in _BRIDGE_HINTS)
+    ]
+    if not candidates:
+        available = ", ".join(p.device for p in list_ports.comports()) or "none"
+        raise ActuatorError(
+            f"port: auto found no USB-UART bridge. Ports present: {available}. "
+            f"Check the cable carries data (not charge-only) and that the board "
+            f"is powered, then run 'python -m tools.serial_probe --list'."
+        )
+    if len(candidates) > 1:
+        names = ", ".join(f"{p.device} ({p.description})" for p in candidates)
+        raise ActuatorError(
+            f"port: auto is ambiguous, {len(candidates)} bridges found: {names}. "
+            f"Set actuator.port explicitly in the config."
+        )
+
+    logger.info(
+        "port: auto resolved to %s (%s)", candidates[0].device, candidates[0].description
+    )
+    return candidates[0].device
+
+
 class ActuatorDriver(ABC):
     """Gimbal plus effector contract.
 
@@ -110,6 +162,8 @@ class SerialActuator(ActuatorDriver):
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._running = threading.Event()
+        self._heartbeat_enabled = threading.Event()
+        self._heartbeat_enabled.set()
         self._reader: Optional[threading.Thread] = None
         self._heartbeat: Optional[threading.Thread] = None
 
@@ -135,6 +189,7 @@ class SerialActuator(ActuatorDriver):
         except ImportError as exc:
             raise ActuatorError("pyserial not installed. pip install pyserial") from exc
 
+        self._port_name = resolve_port(self._port_name)
         try:
             self._serial = serial.Serial(
                 self._port_name, self._baud, timeout=0.1, write_timeout=0.5
@@ -142,8 +197,20 @@ class SerialActuator(ActuatorDriver):
         except (OSError, ValueError) as exc:
             raise ActuatorError(f"Could not open {self._port_name}: {exc}") from exc
 
-        # ESP32 resets when the bridge asserts DTR; wait out the boot.
+        # ESP32 resets when the bridge asserts DTR; wait out the boot. Capture
+        # the banner BEFORE discarding the buffer — it carries the PWM attach
+        # state, which is the only report of a failure that is otherwise silent.
         time.sleep(2.0)
+        try:
+            pending = self._serial.read(self._serial.in_waiting or 0)
+            for line in pending.decode("ascii", errors="replace").splitlines():
+                if "BOOT" in line or "ATTACH FAILED" in line:
+                    if "ATTACH FAILED" in line:
+                        logger.critical("Firmware boot: %s", line.strip())
+                    else:
+                        logger.info("Firmware boot: %s", line.strip())
+        except (OSError, ValueError) as exc:
+            logger.debug("Could not read boot banner: %s", exc)
         self._serial.reset_input_buffer()
 
         self._running.set()
@@ -216,6 +283,10 @@ class SerialActuator(ActuatorDriver):
                 )
                 with self._state_lock:
                     self._errors.append(line)
+            elif line.startswith("DIAG") or "ATTACH FAILED" in line:
+                logger.warning("Firmware: %s", line)
+            elif line.startswith("OK BOOT"):
+                logger.info("Firmware: %s", line)
             elif not line.startswith("OK"):
                 logger.debug("Firmware: %s", line)
 
@@ -223,6 +294,8 @@ class SerialActuator(ActuatorDriver):
         """Refresh the firmware deadman when the loop is otherwise idle."""
         while self._running.is_set():
             time.sleep(HEARTBEAT_INTERVAL_S / 2.0)
+            if not self._heartbeat_enabled.is_set():
+                continue
             if time.monotonic() - self._last_write < HEARTBEAT_INTERVAL_S:
                 continue
             try:
@@ -265,6 +338,29 @@ class SerialActuator(ActuatorDriver):
                 "E-STOP COULD NOT BE SENT: %s. Firmware deadman will cut the "
                 "effector within the timeout window.", exc,
             )
+
+    def suspend_heartbeat(self) -> None:
+        """Stop refreshing the firmware deadman, WITHOUT stopping the reader.
+
+        Diagnostic hook for verifying the deadman on real hardware. Clearing
+        `_running` would stop the reader thread too, so the firmware would cut
+        the effector and the host would never see the status frame proving it —
+        the test would report a failure that did not happen.
+        """
+        self._heartbeat_enabled.clear()
+        logger.warning("Heartbeat SUSPENDED — firmware deadman will fire")
+
+    def resume_heartbeat(self) -> None:
+        """Resume refreshing the deadman."""
+        self._heartbeat_enabled.set()
+
+    def send_raw(self, body: str) -> None:
+        """Send an arbitrary protocol body. Diagnostics and bring-up only.
+
+        Bypasses the typed API deliberately: 'D' and 'T' are firmware
+        diagnostics that have no place in the control path.
+        """
+        self._write(frame(body))
 
     def last_status(self) -> Optional[ActuatorStatus]:
         with self._state_lock:

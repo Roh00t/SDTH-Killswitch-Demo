@@ -16,7 +16,8 @@ camera:
   # loop, so an error here shows up as sluggish or oscillatory tracking.
   horizontal_fov_deg: 65.0
 
-# FALLBACK PROFILE — stock COCO weights.
+# SMOKE-TEST PROFILE — stock COCO weights, person as the target.
+# Purpose: prove the full chain works on real hardware. NOT a demo config.
 # Use when model/best.onnx is not detecting reliably. Same pipeline, same code,
 # only the driver changes. Measured: bird 0.949 on image/myna.jpg vs
 # "helicopter 0.295" from the custom export on the identical image.
@@ -26,10 +27,14 @@ detector:
   conf_threshold: 0.40
   iou_threshold: 0.50
   imgsz: 640
-  # COCO classes. A quadcopter is most often called "airplane" or "kite" by
-  # COCO; "bird" is the reliable stand-in for a moving aerial target. Run
-  # tools.vision_probe against your actual demo target to see which fires.
-  target_classes: ["bird", "airplane", "kite"]
+  # SMOKE TEST ONLY. "person" is the one class COCO never misses and that you
+  # can reliably put in front of the camera. Use this to prove the whole chain
+  # end to end — detect, track, hold, authorise, fire, servos move — before
+  # worrying about what the target actually is.
+  #
+  # Swap back to ["bird", "airplane", "kite"] for anything resembling a real
+  # demo, and never show a judge a C-UAS system tracking a person.
+  target_classes: ["person"]
   device: null          # null = let ultralytics choose (cuda > mps > cpu)
 
 targeting:
@@ -59,16 +64,16 @@ prediction:
 
 engagement:
   hold_error_px: 15.0        # Error band for HOLD.
-  hold_duration_s: 3.0       # Continuous. Resets on any excursion.
+  hold_duration_s: 2.0       # Continuous. Resets on any excursion.
   track_loss_timeout_s: 1.0  # No target for this long -> back to SCAN.
-  scan_timeout_s: 30.0       # No detection for this long -> IDLE.
+  scan_timeout_s: 45.0       # No detection for this long -> IDLE.
   auth_timeout_s: 10.0       # No operator decision -> back to TRACK.
   burn_duration_s: 2.0       # Firmware enforces its own ceiling regardless.
 
 scan:
   pan_step_deg: 4.0
   tilt_step_deg: 8.0
-  max_cycles: 2
+  max_cycles: 6
   # Azimuth the gimbal faces at pan centre. Cues outside +/-90 of this are
   # rejected, not clamped.
   boresight_azimuth_deg: 0.0
