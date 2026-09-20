@@ -142,3 +142,16 @@ class TestAuthorisationBinding:
     def test_untracked_detection_yields_none_track_id(self):
         aim = AimpointSolver().solve(make_det(track_id=None))
         assert aim.track_id is None
+
+
+class TestDegenerateBoxRejection:
+    """Real model output contained a 44x0 box clipped at the frame edge."""
+
+    def test_zero_height_box_is_gated_to_centre_of_mass(self):
+        solver = AimpointSolver(offset_x=-0.35, offset_y=-0.35, min_box_px=40.0)
+        aim = solver.solve(make_det(x=1258.0, y=0.0, w=44.0, h=0.0))
+        assert aim.downgraded is True
+        assert (aim.x, aim.y) == (1258.0, 0.0)
+
+    def test_zero_area_box_has_zero_min_dimension(self):
+        assert make_det(w=44.0, h=0.0).min_dimension == 0.0

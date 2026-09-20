@@ -39,9 +39,17 @@ Weights train on **Google Colab**, land as `.pt`/`.onnx`, and are **gitignored**
 
 ## Tech Stack
 
-Python 3.9+ · OpenCV · Ultralytics YOLOv11 + ByteTrack · `paho-mqtt<2.0` (2.x changed
-callback signatures — do not unpin) · pyserial · PyYAML · pytest · C++/Arduino
-(`ESP32Servo`, LEDC).
+Python 3.9+ · OpenCV · Ultralytics YOLOv11 + ByteTrack · onnxruntime · `paho-mqtt<2.0`
+(2.x changed callback signatures — do not unpin) · pyserial · PyYAML · pytest ·
+C++/Arduino (`ESP32Servo`, LEDC).
+
+**`lap>=0.5.12` is pinned deliberately.** Ultralytics does not declare it, and
+auto-installs it on the first `model.track()` call — which fails on an offline demo box,
+at runtime, mid-engagement.
+
+**Model:** `model/best.onnx`, YOLO11s, classes `{0: drone, 1: bird, 2: airplane,
+3: helicopter}`. Filtering is by NAME, so index drift cannot silently re-target the
+system; an unknown name is rejected at construction.
 
 ---
 
@@ -100,6 +108,16 @@ Not style preferences — each one has a real bug behind it.
 
 10. **Control law lives in one place.** `helper/state/control.py::compute_correction` is
     shared by the node and the simulator. If they diverge, the simulator proves nothing.
+
+11. **The control law steps only on a NEW observation.** `_drive_to_target` gates on
+    `TrackSnapshot.frame_id`. The tick runs at 100 Hz; the model delivers ~4.6 fps.
+    Without the gate the same stale error is re-applied ~20x per frame and the gimbal
+    winds up. A feedback loop may only step when its feedback is new.
+
+12. **`imgsz` in config must match the export.** `model/best.onnx` is fixed-shape at
+    1024x1024 (`dynamic: False`). Ultralytics **silently overrides** any other value, so
+    a wrong `imgsz` is a no-op that looks like a tuning knob. The detector reads the
+    native size from ONNX metadata and warns loudly on mismatch.
 
 ---
 

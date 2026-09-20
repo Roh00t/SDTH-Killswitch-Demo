@@ -266,7 +266,7 @@ ever moves toward safety.
 | Camera exposure + USB transfer | ~16.7 ms | measured, 59.8 fps @720p MJPG |
 | Driver latency | ~15 ms | measured |
 | **Capture subtotal** | **~32 ms** | **measured** |
-| YOLOv11 inference | 10–80 ms | device-dependent; measured live by `LatencyTracker` |
+| YOLOv11s ONNX inference @1024 | **216 ms** | **measured, macOS CPU** — re-measure on the demo box |
 | Track + solve + control | < 3 ms | |
 | Serial TX + ESP32 parse | ~3 ms | |
 | **Glass → serial write** | **measured at runtime** | `LatencyTracker.compute_latency_s` |
@@ -276,6 +276,31 @@ ever moves toward safety.
 `LatencyTracker` maintains an EWMA of real capture-to-command intervals and feeds it
 straight into the predictor's lead time. Quote the compute figure as measured and the
 mechanical figure as estimated — the distinction is the credibility.
+
+### The observation rate is the binding constraint
+
+`model/best.onnx` is a **fixed-shape YOLO11s export at 1024x1024** (`dynamic: False`), so
+Ultralytics silently ignores any other `imgsz`. On macOS CPU it delivers **4.6 fps**.
+
+The tick loop runs at 100 Hz so fail-safes stay responsive, but **the control law may only
+step on a NEW observation.** Re-running it on a stale snapshot re-applies the same error
+~20 times per frame, each correction stacking on the last, winding the gimbal far past the
+target. `_drive_to_target` gates on `TrackSnapshot.frame_id` for exactly this reason.
+
+**Measured target-rate envelope at 4.6 fps** (closed-loop simulation, `Kp=0.6`):
+
+| Target behaviour | Steady-state error | HOLD latches? |
+|---|---|---|
+| Static | 1.2 px | yes |
+| Steady crossing, 5–20 deg/s | 3–6 px | yes |
+| Weave +/-15 deg @ 0.1 Hz | 6.8 px | yes |
+| Weave +/-15 deg @ 0.2 Hz | 21.7 px | **no** |
+| Weave +/-15 deg @ 0.4 Hz | 170 px | **no** |
+
+At 50 fps the 0.4 Hz weave holds at 1.5 px. The limit is **sampling rate, not tuning** —
+a predictor-smoothing sweep from 0.2 to 1.0 never brought the 0.4 Hz weave inside the
+band. You cannot track what you cannot observe. Faster inference (GPU, or a 640 re-export)
+is the only fix.
 
 ---
 

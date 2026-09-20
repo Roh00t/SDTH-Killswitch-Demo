@@ -3,8 +3,17 @@
 
 # Vision
 opencv-python>=4.8.0
-ultralytics>=8.3.0          # YOLOv11 + ByteTrack
+ultralytics>=8.3.0          # YOLOv11
 numpy>=1.24.0
+
+# ONNX runtime for model/best.onnx
+onnxruntime>=1.16.0
+onnx>=1.15.0
+
+# ByteTrack's linear-assignment solver. Ultralytics does NOT declare it and
+# auto-installs it on the first model.track() call — which fails on an offline
+# demo box, at runtime, mid-engagement. Pin it explicitly.
+lap>=0.5.12
 
 # Comms
 paho-mqtt<2.0               # 2.x changed callback signatures; do not unpin

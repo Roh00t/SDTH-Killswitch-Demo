@@ -157,15 +157,39 @@ burn ceiling → deadman, printing pass/fail per check.
 python -m tools.simulator
 ```
 
-**4. Run the node:**
+**4. Start the broker.** Platform-specific — `systemctl` does not exist on macOS:
 
 ```bash
-sudo systemctl start mosquitto
-python main.py --config config/bench.yaml
-python main.py --config config/bench.yaml --mock   # no hardware at all
+brew install mosquitto && brew services start mosquitto
 ```
 
-**5. Run the operator console** (separate terminal — this is the demo screen):
+```bash
+sudo apt install -y mosquitto && sudo systemctl start mosquitto
+```
+
+**5. Run the node.** Subsystems mock independently, because they fail
+independently — a dev machine commonly has a camera and model but no ESP32 and no broker:
+
+```bash
+python main.py --config config/bench.yaml
+```
+
+| Flag | Use when |
+|---|---|
+| *(none)* | Everything attached |
+| `--mock-actuator` | No ESP32 plugged in |
+| `--mock-c2` | No MQTT broker running |
+| `--mock-camera` | No camera, or permission not granted |
+| `--mock-detector` | No weights present |
+| `--mock` | All of the above — pure logic run |
+
+Real camera and real model on a laptop with no hardware and no broker:
+
+```bash
+python main.py --config config/bench.yaml --mock-actuator --mock-c2
+```
+
+**6. Run the operator console** (separate terminal — this is the demo screen):
 
 ```bash
 python -m tools.operator_console
@@ -178,6 +202,30 @@ python -m tools.operator_console
 ```bash
 pytest tests/ -q        # 136 tests, zero hardware, ~0.1s
 ```
+
+---
+
+## Platform Notes (macOS)
+
+**Camera permission.** macOS gates camera access per-application. If
+`tools.camera_probe` prints `not authorized to capture video`, grant access to your
+*terminal* app under **System Settings → Privacy & Security → Camera**, then **fully quit
+and reopen the terminal** — the permission is read at process start, so a running shell
+will not pick it up.
+
+**Serial port naming.** macOS does not use `/dev/ttyUSB0`. With a CP2102 bridge the port
+is `/dev/cu.usbserial-XXXX`; with a CH340 it is `/dev/cu.wchusbserial-XXXX`. Always
+confirm before editing `config/bench.yaml`:
+
+```bash
+python -m tools.serial_probe --list
+```
+
+If nothing but `Bluetooth-Incoming-Port` and `debug-console` appears, the board is not
+enumerating — check the cable carries data (not charge-only), that the board is powered,
+and that the CP2102/CH340 driver is installed.
+
+**`systemctl` does not exist on macOS.** Use `brew services` as above.
 
 ---
 

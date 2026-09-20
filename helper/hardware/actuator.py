@@ -118,6 +118,11 @@ class SerialActuator(ActuatorDriver):
         self._last_write: float = 0.0
         self._armed: bool = False
         self._errors: List[str] = []
+        # True once the port has opened AND firmware has answered. Distinguishes
+        # "the effector may be live and we lost control of it" (a real safety
+        # event) from "we never reached the board" (a startup failure). Crying
+        # wolf on the former teaches operators to ignore the log that matters.
+        self._link_established: bool = False
 
     def connect(self) -> None:
         """Open the port, start threads, and force a known safe state.
@@ -161,6 +166,7 @@ class SerialActuator(ActuatorDriver):
                 f"{self._connect_timeout}s. Check the board is running the "
                 f"actuator sketch and that you are on the UART bridge port."
             )
+        self._link_established = True
         logger.info("Actuator connected on %s: %s", self._port_name, self._last_status)
 
     def _write(self, payload: bytes) -> None:
@@ -251,6 +257,10 @@ class SerialActuator(ActuatorDriver):
         try:
             self._write(frame("Z"))
         except ActuatorError as exc:
+            if not self._link_established:
+                # Never reached the board, so nothing was ever energised.
+                logger.debug("E-stop skipped, link was never established: %s", exc)
+                return
             logger.critical(
                 "E-STOP COULD NOT BE SENT: %s. Firmware deadman will cut the "
                 "effector within the timeout window.", exc,
@@ -262,6 +272,10 @@ class SerialActuator(ActuatorDriver):
 
     def confirm_effector_off(self, timeout: float = 0.5) -> bool:
         """Wait for a status frame showing the effector de-energised."""
+        if not self._link_established:
+            # The board was never reached, so the effector was never armed and
+            # never energised. Nothing to confirm; this is not a safety event.
+            return True
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             status = self.last_status()
@@ -293,7 +307,9 @@ class SerialActuator(ActuatorDriver):
         if self._serial is not None:
             self._serial.close()
             self._serial = None
-        logger.info("Actuator link closed")
+        if self._link_established:
+            logger.info("Actuator link closed")
+        self._link_established = False
 
 
 class MockActuator(ActuatorDriver):

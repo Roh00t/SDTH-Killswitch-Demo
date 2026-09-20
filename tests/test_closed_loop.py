@@ -139,3 +139,79 @@ class TestFeedForwardUnit:
         )
         assert correction is not None
         assert abs(correction[0]) <= gains.max_step_deg
+
+
+class TestDetectionRateDecoupling:
+    """Regression tests for the stale-snapshot windup.
+
+    The tick loop runs at 100 Hz so fail-safes stay responsive, but the ONNX
+    model delivers ~4.6 observations/second. Before the frame_id gate, the
+    control law re-applied the same stale error ~20x per observation, each
+    correction stacking on the last.
+    """
+
+    def test_static_target_converges_at_measured_detection_rate(self):
+        result = run_engagement(
+            SimulatedTarget(azimuth_deg=100.0, elevation_deg=90.0),
+            default_gains(), tick_hz=100.0, detection_hz=4.6, ticks=800,
+        )
+        assert result.steady_state_error_px < HOLD_PX
+
+    def test_steady_rate_target_converges_at_measured_detection_rate(self):
+        result = run_engagement(
+            SimulatedTarget(azimuth_deg=100.0, elevation_deg=90.0, az_rate_deg_s=20.0),
+            default_gains(), tick_hz=100.0, detection_hz=4.6, ticks=400,
+        )
+        assert result.steady_state_error_px < HOLD_PX
+
+    def test_fast_tick_does_not_wind_up_against_slow_detections(self):
+        """A 100 Hz tick against 4.6 fps must not diverge from a 50 Hz tick."""
+        slow_tick = run_engagement(
+            SimulatedTarget(azimuth_deg=100.0, elevation_deg=90.0),
+            default_gains(), tick_hz=50.0, detection_hz=4.6, ticks=800,
+        )
+        fast_tick = run_engagement(
+            SimulatedTarget(azimuth_deg=100.0, elevation_deg=90.0),
+            default_gains(), tick_hz=100.0, detection_hz=4.6, ticks=800,
+        )
+        assert fast_tick.steady_state_error_px < HOLD_PX
+        assert fast_tick.steady_state_error_px == pytest.approx(
+            slow_tick.steady_state_error_px, abs=HOLD_PX
+        )
+
+    @pytest.mark.parametrize("rate", [5.0, 10.0, 15.0, 20.0])
+    def test_target_rate_envelope_at_measured_fps(self, rate):
+        """Documents the envelope: steady-rate targets up to 20 deg/s hold."""
+        result = run_engagement(
+            SimulatedTarget(azimuth_deg=100.0, elevation_deg=90.0, az_rate_deg_s=rate),
+            default_gains(), tick_hz=100.0, detection_hz=4.6, ticks=400,
+        )
+        assert result.steady_state_error_px < HOLD_PX
+
+    def test_manoeuvring_target_exceeds_the_envelope_at_low_fps(self):
+        """Honest limit, asserted so it cannot regress silently.
+
+        A target reversing at 0.4 Hz cannot be held at 4.6 fps — you cannot
+        track what you cannot observe. Faster inference is the only fix;
+        predictor tuning does not rescue it. At 50 fps the same target holds.
+        """
+        slow = run_engagement(
+            SimulatedTarget(azimuth_deg=95.0, elevation_deg=90.0,
+                            az_weave_deg=15.0, az_weave_hz=0.4),
+            default_gains(), tick_hz=100.0, detection_hz=4.6, ticks=800,
+        )
+        fast = run_engagement(
+            SimulatedTarget(azimuth_deg=95.0, elevation_deg=90.0,
+                            az_weave_deg=15.0, az_weave_hz=0.4),
+            default_gains(), tick_hz=100.0, detection_hz=50.0, ticks=800,
+        )
+        assert slow.steady_state_error_px > HOLD_PX, "envelope limit disappeared"
+        assert fast.steady_state_error_px < HOLD_PX, "fast path regressed"
+
+    def test_gentle_manoeuvre_is_inside_the_envelope(self):
+        result = run_engagement(
+            SimulatedTarget(azimuth_deg=95.0, elevation_deg=90.0,
+                            az_weave_deg=15.0, az_weave_hz=0.1),
+            default_gains(), tick_hz=100.0, detection_hz=4.6, ticks=800,
+        )
+        assert result.steady_state_error_px < HOLD_PX

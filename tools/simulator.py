@@ -171,6 +171,7 @@ def run_engagement(
     use_prediction: bool = True,
     lead_time_s: float = 0.09,
     tick_hz: float = 50.0,
+    detection_hz: Optional[float] = None,
     ticks: int = 400,
     hold_threshold_px: float = 15.0,
     world: Optional[SimulatedWorld] = None,
@@ -186,6 +187,11 @@ def run_engagement(
         lead_time_s: Lead applied when predicting. In the node this comes from
             LatencyTracker.total_lead_s, measured live.
         tick_hz: Control loop rate.
+        detection_hz: Rate at which NEW detections arrive. None means every
+            tick. Set this to the model's real inference rate to simulate the
+            decoupling that actually exists: the tick loop runs at 100 Hz but
+            a 216 ms model only delivers ~4.6 observations per second, so the
+            controller spends most ticks extrapolating from a stale snapshot.
         ticks: Maximum iterations.
         hold_threshold_px: Error band counted as converged.
 
@@ -205,9 +211,20 @@ def run_engagement(
     lost = False
     elapsed = 0.0
     gimbal_rate = (0.0, 0.0)  # deg/s, from the previous tick's command
+    detection_period = (1.0 / detection_hz) if detection_hz else 0.0
+    last_detection_at = -1e9
+    held_detection = None
 
     for tick in range(ticks):
-        detection = world.observe(target, gimbal)
+        # Observations arrive only as fast as the model can produce them.
+        if detection_period <= 0.0 or (elapsed - last_detection_at) >= detection_period:
+            held_detection = world.observe(target, gimbal)
+            last_detection_at = elapsed
+            fresh = True
+        else:
+            fresh = False
+        detection = held_detection
+
         if detection is None:
             lost = True
             errors.append(float("inf"))
@@ -217,7 +234,10 @@ def run_engagement(
             continue
 
         aim = solver.solve(detection)
-        predictor.update(aim, timestamp=elapsed)
+        if fresh:
+            # Only feed the estimator genuinely new observations; re-feeding a
+            # stale one would read as zero velocity and kill the feed-forward.
+            predictor.update(aim, timestamp=elapsed)
 
         feedforward = (0.0, 0.0)
         if use_prediction:
@@ -229,9 +249,13 @@ def run_engagement(
             # when the loop starts working.
             velocity = predictor.velocity_px_s
             if velocity is not None:
+                # Feed-forward must advance by one OBSERVATION interval, not one
+                # tick. At 4.6 fps those differ by 20x, and using the tick
+                # interval under-feeds the loop by the same factor.
+                obs_dt = detection_period if detection_period > 0 else dt
                 world_pan_rate = velocity[0] / px_per_deg + gimbal_rate[0]
                 world_tilt_rate = -velocity[1] / px_per_deg + gimbal_rate[1]
-                feedforward = (world_pan_rate * dt, world_tilt_rate * dt)
+                feedforward = (world_pan_rate * obs_dt, world_tilt_rate * obs_dt)
         else:
             aim_x, aim_y = aim.x, aim.y
 
@@ -240,17 +264,21 @@ def run_engagement(
         if converged_at is None and error <= hold_threshold_px:
             converged_at = tick
 
-        correction = compute_correction(
-            aim_x, aim_y, world.center, gains, feedforward_deg=feedforward
-        )
-        if correction is not None:
-            gimbal.command(
-                gimbal.commanded_pan + correction[0],
-                gimbal.commanded_tilt + correction[1],
+        # Command only on a fresh observation — mirrors the node's frame_id
+        # gate. Stepping a feedback loop on stale feedback winds it up.
+        if fresh:
+            correction = compute_correction(
+                aim_x, aim_y, world.center, gains, feedforward_deg=feedforward
             )
-            gimbal_rate = (correction[0] / dt, correction[1] / dt)
-        else:
-            gimbal_rate = (0.0, 0.0)
+            if correction is not None:
+                gimbal.command(
+                    gimbal.commanded_pan + correction[0],
+                    gimbal.commanded_tilt + correction[1],
+                )
+                obs_dt = detection_period if detection_period > 0 else dt
+                gimbal_rate = (correction[0] / obs_dt, correction[1] / obs_dt)
+            else:
+                gimbal_rate = (0.0, 0.0)
 
         target.step(dt)
         gimbal.step(dt)

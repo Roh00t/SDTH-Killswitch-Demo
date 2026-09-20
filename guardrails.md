@@ -164,6 +164,13 @@ it. A stalled SG90 draws locked-rotor current and cooks.
 
 ## 5. Vision & Model Gates
 
+- `[HARD]` **The control law steps only on a NEW observation.** `_drive_to_target` gates
+  on `TrackSnapshot.frame_id`. The tick runs at 100 Hz; inference delivers ~4.6 fps.
+  Ungated, the same stale error is re-applied ~20x per frame and the gimbal winds far past
+  the target. Verified by `test_fast_tick_does_not_wind_up_against_slow_detections`.
+- `[HARD]` **Reject degenerate boxes at the detector.** Boxes under 2 px in either axis are
+  edge-clipping artefacts, not targets. Real model output produced a 44x0 box; a zero-area
+  box yields a meaningless aimpoint and causes ByteTrack to drop the track.
 - `[HARD]` **Resolution gate.** Below `min_box_px`, revert to centre-of-mass and record
   the downgrade in `AimPoint.reason`. An offset smaller than box jitter aims at noise.
 - `[HARD]` Clamp offsets to ±0.5 — the aimpoint may never leave its detected box.
@@ -177,6 +184,10 @@ it. A stalled SG90 draws locked-rotor current and cooks.
   engagement claim — fix the class balance or disclose it explicitly.
 - `[STRICT]` Cap the applied lead (`max_lead_px`). An unbounded lead from a noisy velocity
   estimate slews the gimbal off target.
+- `[STRICT]` **Know the target-rate envelope and do not exceed it on stage.** At the
+  measured 4.6 fps the system holds static and steady-rate targets to 20 deg/s, and
+  manoeuvres up to ~0.1 Hz reversal. A 0.4 Hz weave is outside the envelope and HOLD will
+  not latch. This is a sampling limit — predictor tuning does not rescue it.
 
 ---
 

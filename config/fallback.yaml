@@ -16,21 +16,20 @@ camera:
   # loop, so an error here shows up as sluggish or oscillatory tracking.
   horizontal_fov_deg: 65.0
 
+# FALLBACK PROFILE — stock COCO weights.
+# Use when model/best.onnx is not detecting reliably. Same pipeline, same code,
+# only the driver changes. Measured: bird 0.949 on image/myna.jpg vs
+# "helicopter 0.295" from the custom export on the identical image.
+# 63ms inference at 640 vs 218ms at 1024, so ~16fps instead of ~4.6fps.
 detector:
-  weights: "model/best.onnx"
+  weights: "yolo11s.pt"          # auto-downloads on first run
   conf_threshold: 0.40
   iou_threshold: 0.50
-  # MUST match the export. best.onnx is a FIXED-SHAPE export at 1024x1024
-  # (dynamic=False), so Ultralytics silently ignores any other value. Setting
-  # 640 here does not make it run at 640 — it makes the config a lie.
-  # Verified: onnxruntime reports input "images" shape [1, 3, 1024, 1024].
-  imgsz: 1024
-  # Model class map, read from ONNX metadata:
-  #   {0: drone, 1: bird, 2: airplane, 3: helicopter}
-  # bird/airplane/helicopter are the confuser classes — trained as negatives,
-  # never engaged. Filtering is by NAME, so index drift cannot silently
-  # re-target us; an unknown name is rejected at construction.
-  target_classes: ["drone"]
+  imgsz: 640
+  # COCO classes. A quadcopter is most often called "airplane" or "kite" by
+  # COCO; "bird" is the reliable stand-in for a moving aerial target. Run
+  # tools.vision_probe against your actual demo target to see which fires.
+  target_classes: ["bird", "airplane", "kite"]
   device: null          # null = let ultralytics choose (cuda > mps > cpu)
 
 targeting:

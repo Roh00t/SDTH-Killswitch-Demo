@@ -62,9 +62,33 @@ class KillswitchNode:
     mutable dict — that pattern is what this refactor removed.
     """
 
-    def __init__(self, config: Dict[str, Any], mock: bool = False) -> None:
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        mock: bool = False,
+        mock_actuator: bool = False,
+        mock_c2: bool = False,
+        mock_camera: bool = False,
+        mock_detector: bool = False,
+    ) -> None:
+        """Args:
+            config: Parsed bench.yaml.
+            mock: Mock every subsystem — no hardware of any kind.
+            mock_actuator: Mock only the gimbal/effector (no ESP32 attached).
+            mock_c2: Mock only the C2 plane (no MQTT broker running).
+            mock_camera: Mock only the camera.
+            mock_detector: Mock only the detector (no weights needed).
+
+        The granular flags exist because the subsystems fail independently in
+        practice: a dev machine commonly has a working camera and model but no
+        ESP32 and no broker, and that configuration is worth exercising.
+        """
         self._cfg = config
         self._mock = mock
+        self._mock_actuator = mock or mock_actuator
+        self._mock_c2 = mock or mock_c2
+        self._mock_camera = mock or mock_camera
+        self._mock_detector = mock or mock_detector
 
         # Dependencies are declared here and CONSTRUCTED in start(). Nothing is
         # implicitly available; nothing starts before it is injected.
@@ -98,6 +122,7 @@ class KillswitchNode:
         self._vision_thread: Optional[threading.Thread] = None
         self._audit = AuditLog(node_id=config["node"]["id"])
         self._video: Optional[VideoPublisher] = None
+        self._shutdown_done = False
 
         # Engagement bookkeeping. Owned by the main thread only.
         self._commanded: Tuple[float, float] = (
@@ -113,6 +138,7 @@ class KillswitchNode:
         self._gains: Optional[ControlGains] = None
         self._gimbal_rate: Tuple[float, float] = (0.0, 0.0)
         self._last_command_at: Optional[float] = None
+        self._last_acted_frame_id: int = -1
         self._engagement_metrics: Dict[str, Any] = {}
 
     # ---- lifecycle -------------------------------------------------------
@@ -133,7 +159,13 @@ class KillswitchNode:
             RuntimeError: If any dependency fails to initialise. Partial startup
                 always tears down rather than running degraded.
         """
-        logger.info("Starting node (mock=%s)", self._mock)
+        logger.info(
+            "Starting node — actuator=%s camera=%s detector=%s c2=%s",
+            "MOCK" if self._mock_actuator else "real",
+            "MOCK" if self._mock_camera else "real",
+            "MOCK" if self._mock_detector else "real",
+            "MOCK" if self._mock_c2 else "real",
+        )
         try:
             self._build_actuator()      # 1. effector first: safe state established
             self._build_camera()        # 2. sensor
@@ -165,7 +197,10 @@ class KillswitchNode:
             )
 
         self._audit.write("node_start", {
-            "mock": self._mock,
+            "mock_actuator": self._mock_actuator,
+            "mock_camera": self._mock_camera,
+            "mock_detector": self._mock_detector,
+            "mock_c2": self._mock_c2,
             "frame_size": list(self._camera.frame_size),
             "deg_per_px": round(self._gains.deg_per_px, 5),
         })
@@ -179,7 +214,7 @@ class KillswitchNode:
         self._enter_idle("startup")
 
     def _build_actuator(self) -> None:
-        if self._mock:
+        if self._mock_actuator:
             self._actuator = MockActuator()
         else:
             self._actuator = SerialActuator(
@@ -189,7 +224,7 @@ class KillswitchNode:
 
     def _build_camera(self) -> None:
         cam = self._cfg["camera"]
-        if self._mock:
+        if self._mock_camera:
             self._camera = MockFrameSource(cam["width"], cam["height"])
         else:
             self._camera = UsbCameraSource(
@@ -203,7 +238,7 @@ class KillswitchNode:
 
     def _build_detector(self) -> None:
         det = self._cfg["detector"]
-        if self._mock:
+        if self._mock_detector:
             self._detector = ScriptedDetector([])
             return
         self._detector = UltralyticsDetector(
@@ -217,7 +252,7 @@ class KillswitchNode:
 
     def _build_c2(self) -> None:
         c2 = self._cfg["c2"]
-        if self._mock:
+        if self._mock_c2:
             self._c2 = MockC2Client(auth_token=c2["auth_token"])
         else:
             self._c2 = C2Client(
@@ -229,7 +264,16 @@ class KillswitchNode:
         self._c2.connect()
 
     def shutdown(self) -> None:
-        """De-energise, stop threads, release everything. Safe to call twice."""
+        """De-energise, stop threads, release everything. Safe to call twice.
+
+        Idempotent by flag: a failed start() tears down, and main()'s finally
+        tears down again. Running the whole sequence twice produced duplicate
+        logs and a second round of effector-safety checks against an already
+        closed link.
+        """
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
         logger.info("Shutting down")
         self._running.clear()
 
@@ -238,7 +282,10 @@ class KillswitchNode:
             try:
                 self._actuator.emergency_stop()
                 if not self._actuator.confirm_effector_off(timeout=0.5):
-                    logger.critical("COULD NOT CONFIRM EFFECTOR OFF during shutdown")
+                    logger.critical(
+                        "COULD NOT CONFIRM EFFECTOR OFF during shutdown — treat the "
+                        "effector as potentially live until the firmware deadman expires"
+                    )
             except ActuatorError as exc:
                 logger.critical("Actuator failed during shutdown: %s", exc)
 
@@ -546,8 +593,22 @@ class KillswitchNode:
                     )
             return None
 
-        self._last_target_seen = now
+        # Staleness is judged by when the frame was PROCESSED, not by when we
+        # happened to look at it. At 100 Hz tick and ~5 fps inference, 'now' is
+        # up to 200 ms later than the observation it describes.
+        self._last_target_seen = snapshot.processed_at
         self._active_track_id = snapshot.aim.track_id
+
+        # ONLY act on a NEW observation. The tick loop runs at 100 Hz to keep
+        # fail-safes responsive, but the model delivers ~5 observations/second.
+        # Re-running the control law on a stale snapshot re-applies the same
+        # error ~20 times, each correction stacking on the last, which winds the
+        # gimbal far past the target and oscillates. A feedback loop may only
+        # step when its feedback is new.
+        if snapshot.frame_id == self._last_acted_frame_id:
+            return snapshot
+        self._last_acted_frame_id = snapshot.frame_id
+
         self._predictor.update(snapshot.aim, snapshot.processed_at)
         # Sample latency for every processed snapshot, not only for those that
         # produce a command: a target sitting inside the deadband would
@@ -665,6 +726,7 @@ class KillswitchNode:
         self._active_target_id = None
         self._gimbal_rate = (0.0, 0.0)
         self._last_command_at = None
+        self._last_acted_frame_id = -1
         self._predictor.reset()
         self._snapshots.clear()
         if self._detector is not None:
@@ -724,7 +786,16 @@ def load_config(path: str) -> Dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="config/bench.yaml")
-    parser.add_argument("--mock", action="store_true", help="Run with no hardware")
+    parser.add_argument("--mock", action="store_true",
+                        help="Mock everything — no camera, ESP32, broker or weights")
+    parser.add_argument("--mock-actuator", action="store_true",
+                        help="No ESP32 attached")
+    parser.add_argument("--mock-c2", action="store_true",
+                        help="No MQTT broker running")
+    parser.add_argument("--mock-camera", action="store_true",
+                        help="Synthetic frames instead of a camera")
+    parser.add_argument("--mock-detector", action="store_true",
+                        help="No model weights needed")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -734,7 +805,14 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
 
-    node = KillswitchNode(load_config(args.config), mock=args.mock)
+    node = KillswitchNode(
+        load_config(args.config),
+        mock=args.mock,
+        mock_actuator=args.mock_actuator,
+        mock_c2=args.mock_c2,
+        mock_camera=args.mock_camera,
+        mock_detector=args.mock_detector,
+    )
 
     def handle_signal(signum, _frame):
         logger.info("Signal %d received, stopping", signum)
