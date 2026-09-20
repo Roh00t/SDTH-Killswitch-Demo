@@ -22,7 +22,9 @@ from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
+from helper.comms.audit import AuditLog
 from helper.comms.mqtt_client import C2Client, MockC2Client
+from helper.comms.video import VideoPublisher
 from helper.comms.schemas import OperatorAuth, SlewToCue
 from helper.hardware.actuator import ActuatorDriver, ActuatorError, MockActuator, SerialActuator
 from helper.state.machine import (
@@ -33,6 +35,7 @@ from helper.state.machine import (
     TrackSnapshot,
     Transition,
 )
+from helper.state.control import ControlGains, compute_correction
 from helper.state.sweep import SweepController, cue_to_gimbal
 from helper.vision.aimpoint import AimpointSolver, error_magnitude, select_priority_target
 from helper.vision.detector import Detector, DetectorError, ScriptedDetector, UltralyticsDetector
@@ -93,6 +96,8 @@ class KillswitchNode:
 
         self._running = threading.Event()
         self._vision_thread: Optional[threading.Thread] = None
+        self._audit = AuditLog(node_id=config["node"]["id"])
+        self._video: Optional[VideoPublisher] = None
 
         # Engagement bookkeeping. Owned by the main thread only.
         self._commanded: Tuple[float, float] = (
@@ -105,7 +110,9 @@ class KillswitchNode:
         self._active_target_id: Optional[str] = None
         self._burn_started_at: Optional[float] = None
         self._consumed_nonces: set = set()
-        self._deg_per_px: float = 0.05
+        self._gains: Optional[ControlGains] = None
+        self._gimbal_rate: Tuple[float, float] = (0.0, 0.0)
+        self._last_command_at: Optional[float] = None
         self._engagement_metrics: Dict[str, Any] = {}
 
     # ---- lifecycle -------------------------------------------------------
@@ -141,11 +148,27 @@ class KillswitchNode:
         assert self._actuator is not None and self._c2 is not None
 
         width, _ = self._camera.frame_size
-        self._deg_per_px = self._cfg["camera"]["horizontal_fov_deg"] / float(width)
+        self._gains = ControlGains.from_config(self._cfg, width)
         logger.info(
-            "Control gain: %.4f deg/px (FOV %.1f over %d px)",
-            self._deg_per_px, self._cfg["camera"]["horizontal_fov_deg"], width,
+            "Control gain: %.4f deg/px (FOV %.1f over %d px), Kp=%.2f",
+            self._gains.deg_per_px, self._cfg["camera"]["horizontal_fov_deg"],
+            width, self._gains.proportional_gain,
         )
+
+        if self._cfg.get("video", {}).get("enabled", True):
+            video_cfg = self._cfg.get("video", {})
+            self._video = VideoPublisher(
+                self._c2,
+                fps=video_cfg.get("fps", 15.0),
+                max_width=video_cfg.get("max_width", 640),
+                quality=video_cfg.get("quality", 60),
+            )
+
+        self._audit.write("node_start", {
+            "mock": self._mock,
+            "frame_size": list(self._camera.frame_size),
+            "deg_per_px": round(self._gains.deg_per_px, 5),
+        })
 
         # Only now do threads start.
         self._running.set()
@@ -237,6 +260,10 @@ class KillswitchNode:
                 logger.error("Error during %s.%s(): %s", type(component).__name__, verb, exc)
 
         logger.info("Latency at shutdown: %s", self._latency.summary())
+        self._audit.write("node_stop", {"latency": self._latency.summary()})
+        if self._audit.path is not None:
+            logger.info("Audit trail written to %s", self._audit.path)
+        self._audit.close()
 
     # ---- vision worker ---------------------------------------------------
 
@@ -315,9 +342,28 @@ class KillswitchNode:
                 logger.critical("Unhandled fault in tick: %s", exc, exc_info=True)
                 self._enter_idle(f"unhandled fault: {exc}")
 
+            self._pump_video()
+
             elapsed = time.monotonic() - tick_start
             if elapsed < period:
                 time.sleep(period - elapsed)
+
+    def _pump_video(self) -> None:
+        """Publish an annotated frame to the operator console. Best-effort."""
+        if self._video is None or self._camera is None:
+            return
+        frame, _ = self._camera.read()
+        if frame is None:
+            return
+        progress = 0.0
+        if self._hold_started_at is not None:
+            progress = (
+                (time.monotonic() - self._hold_started_at)
+                / self._cfg["engagement"]["hold_duration_s"]
+            )
+        self._video.maybe_publish(
+            frame, self._snapshots.latest(), self._machine.state.value, progress
+        )
 
     def _check_liveness(self) -> None:
         """Fault to IDLE on loss of any subsystem while past IDLE."""
@@ -511,20 +557,32 @@ class KillswitchNode:
         predicted = self._predictor.predict(self._latency.total_lead_s)
         aim_x, aim_y = predicted if predicted is not None else (snapshot.aim.x, snapshot.aim.y)
 
-        cx, cy = self._camera.frame_center
-        error_x, error_y = aim_x - cx, aim_y - cy
+        # Velocity feed-forward. A pure P controller needs a standing error to
+        # sustain a slew rate, which puts a fast target permanently outside the
+        # HOLD band. The target's world rate is its apparent image rate PLUS the
+        # gimbal's own rate — without the second term the estimate collapses to
+        # zero exactly when tracking starts working. See helper/state/control.py.
+        dt = (now - self._last_command_at) if self._last_command_at else 0.0
+        self._last_command_at = now
+        feedforward = (0.0, 0.0)
+        velocity = self._predictor.velocity_px_s
+        if velocity is not None and 0.0 < dt < 0.5:
+            px_per_deg = 1.0 / self._gains.deg_per_px
+            world_pan_rate = velocity[0] / px_per_deg + self._gimbal_rate[0]
+            world_tilt_rate = -velocity[1] / px_per_deg + self._gimbal_rate[1]
+            feedforward = (world_pan_rate * dt, world_tilt_rate * dt)
 
-        deadband = self._cfg["control"]["deadband_px"]
-        if abs(error_x) < deadband and abs(error_y) < deadband:
+        # Same function the closed-loop simulator exercises.
+        correction = compute_correction(
+            aim_x, aim_y, self._camera.frame_center, self._gains,
+            feedforward_deg=feedforward,
+        )
+        if correction is None:
+            self._gimbal_rate = (0.0, 0.0)
             return snapshot
 
-        gain = self._cfg["control"]["proportional_gain"]
-        max_step = self._cfg["control"]["max_step_deg"]
-        # Pan increases to the right; tilt is inverted because image y grows
-        # downward while elevation grows upward.
-        delta_pan = _clamp(error_x * self._deg_per_px * gain, -max_step, max_step)
-        delta_tilt = _clamp(-error_y * self._deg_per_px * gain, -max_step, max_step)
-
+        delta_pan, delta_tilt = correction
+        self._gimbal_rate = (delta_pan / dt, delta_tilt / dt) if dt > 0 else (0.0, 0.0)
         self._command_gimbal(self._commanded[0] + delta_pan, self._commanded[1] + delta_tilt)
         return snapshot
 
@@ -579,6 +637,7 @@ class KillswitchNode:
             "measured_compute_latency_ms": round(self._latency.compute_latency_s * 1000.0, 1),
         }
         logger.info("ENGAGEMENT COMPLETE: %s", metrics)
+        self._audit.write("engagement_complete", metrics)
         self._c2.publish_event("engagement_complete", metrics)
 
         self._burn_started_at = None
@@ -604,6 +663,8 @@ class KillswitchNode:
         self._burn_started_at = None
         self._active_track_id = None
         self._active_target_id = None
+        self._gimbal_rate = (0.0, 0.0)
+        self._last_command_at = None
         self._predictor.reset()
         self._snapshots.clear()
         if self._detector is not None:
@@ -638,16 +699,14 @@ class KillswitchNode:
 
     def _publish_transition(self, transition: Transition) -> None:
         """StateMachine callback. Must not block — publish is QoS 1, non-blocking."""
-        if self._c2 is None:
-            return
-        self._c2.publish_event(
-            "state_transition",
-            {
-                "from": transition.from_state.value,
-                "to": transition.to_state.value,
-                "reason": transition.reason,
-            },
-        )
+        detail = {
+            "from": transition.from_state.value,
+            "to": transition.to_state.value,
+            "reason": transition.reason,
+        }
+        self._audit.write("state_transition", detail)
+        if self._c2 is not None:
+            self._c2.publish_event("state_transition", detail)
 
     @property
     def state(self) -> EngagementState:
@@ -655,10 +714,6 @@ class KillswitchNode:
 
     def stop(self) -> None:
         self._running.clear()
-
-
-def _clamp(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, value))
 
 
 def load_config(path: str) -> Dict[str, Any]:

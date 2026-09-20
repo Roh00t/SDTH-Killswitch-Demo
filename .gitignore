@@ -3,11 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
 build/
 dist/
 *.egg-info/
-.eggs/
 
 # Virtual environments
 .venv/
@@ -15,7 +13,7 @@ venv/
 env/
 ENV/
 
-# Environment & secrets  (MQTT creds, broker IPs, auth tokens — never commit)
+# Secrets — MQTT credentials, broker IPs, auth tokens
 .env
 .env.*
 !.env.example
@@ -42,6 +40,10 @@ htmlcov/
 Thumbs.db
 ehthumbs.db
 desktop.ini
+*~
+.directory
+.fuse_hidden*
+.nfs*
 
 # ─── Editors ─────────────────────────────────────────────────────────────────
 .idea/
@@ -49,11 +51,10 @@ desktop.ini
 !.vscode/extensions.json
 *.swp
 *.swo
-*~
 
 # ─── ML weights & exports ────────────────────────────────────────────────────
-# Trained on Google Colab; distribute via release artifacts, not git.
-# Keep model/README.md documenting expected filenames, provenance and metrics.
+# Trained on Google Colab. Distribute via release artifacts, never git.
+# model/README.md documents expected filenames, provenance and per-class metrics.
 *.pt
 *.pth
 *.onnx
@@ -67,7 +68,6 @@ desktop.ini
 runs/
 wandb/
 yolo*.pt
-*.yaml.bak
 
 # ─── Datasets & captures ─────────────────────────────────────────────────────
 datasets/
@@ -77,29 +77,28 @@ data/augmented/
 *.tfrecord
 *.npy
 *.npz
-
-# Frame captures & recordings from test runs
 captures/
 recordings/
 *.mp4
 *.avi
 *.mov
 *.mkv
-# Keep curated demo/reference imagery only
+# Keep curated documentation imagery
 !docs/**/*.png
 !docs/**/*.jpg
-!image/**
 
-# ─── Logs & telemetry ────────────────────────────────────────────────────────
+# ─── Logs, telemetry & test output ───────────────────────────────────────────
+test-logs/
 logs/
 *.log
+*.jsonl
 telemetry/
-benchmarks/*.json
 engagement_logs/
+benchmarks/*.json
 *.csv
 !docs/**/*.csv
 
-# ─── Embedded / ESP32 firmware ───────────────────────────────────────────────
+# ─── Embedded / ESP32 ────────────────────────────────────────────────────────
 .pio/
 .pioenvs/
 .piolibdeps/

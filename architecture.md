@@ -1,8 +1,7 @@
-# Killswitch — System Architecture
+# Killswitch — System Architecture (As-Built)
 
-**Project:** Software-Defined Directed Energy (SDDE) Counter-UAS Node
-**Event:** Singapore Defence Tech Hackathon (SDTH)
-**Status:** Active refactor from legacy Raspberry Pi bird-deterrent codebase
+**Software-Defined Directed Energy (SDDE) Counter-UAS Node**
+Singapore Defence Tech Hackathon · status: implemented, 119 tests passing, hardware-free
 
 ---
 
@@ -10,12 +9,12 @@
 
 Killswitch is a **targeting brain, not a turret.**
 
-The thesis: fielded C-UAS directed-energy systems cost upward of US$1.5M per node as
-closed, vertically integrated hardware. At that price coverage does not scale, and a
-saturating salvo routes around the few nodes a nation can afford. The binding constraint
-is cost-per-node and vendor lock-in — not beam power.
+Fielded C-UAS directed-energy systems arrive as closed, vertically integrated hardware
+north of US$1.5M per node. At that price coverage does not scale, and a saturating salvo
+routes around the few nodes a nation can afford. The binding constraint is cost-per-node
+and vendor lock-in — not beam power.
 
-So every hardware-specific concern sits behind a driver interface:
+Every hardware-specific concern therefore sits behind a driver interface:
 
 ```
         ┌──────────────────────────────────────────┐
@@ -23,328 +22,299 @@ So every hardware-specific concern sits behind a driver interface:
         │   detect → track → predict → aim → gate  │
         └──────────────────────────────────────────┘
                   │              │              │
-           SensorDriver    ActuatorDriver   EffectorDriver
-                  │              │              │
-        ┌─────────┴───┐   ┌──────┴─────┐  ┌─────┴──────┐
-        │ USB camera  │   │ ESP32+SG90 │  │ proxy laser│   ← today, ~US$200
-        │ MWIR imager │   │ beam dir.  │  │ HEL        │   ← operational, same brain
-        └─────────────┘   └────────────┘  └────────────┘
+            FrameSource    ActuatorDriver   (effector via actuator)
+                  │              │
+        ┌─────────┴───┐   ┌──────┴─────┐
+        │ UsbCamera   │   │ Serial     │   ← today, ~US$200 of COTS
+        │ MockFrame   │   │ Mock       │   ← the second implementation
+        │ MWIR imager │   │ beam dir.  │   ← operational, same brain
+        └─────────────┘   └────────────┘
 ```
 
-**The decoupling is the product.** Identical targeting logic must run against the bench
-rig and against a military beam director with no change to the control logic — only a
-driver swap and a retune of loop constants.
+**The decoupling is the product.** The entire test suite — all 119 tests — runs against
+the mock implementations with no camera, no ESP32, no broker and no model weights. That
+is the hardware-agnosticism claim, demonstrated rather than asserted.
 
-### Design principles
+### Design principles, and where they are enforced
 
-1. **Hardware agnosticism at the interface.** Abstract base classes define the contract.
-   Concrete drivers are swappable at construction. Minimum two live implementations of
-   every ABC at all times, so the abstraction is exercised and not theoretical.
-2. **Human authority in the control flow, not bolted on.** `OPERATOR_AUTH` is a state,
-   not a callback. No path reaches `ENGAGE` without traversing it.
-3. **Fail to safe, always.** Every error path, timeout, and lost-lock condition
-   de-energises the effector before doing anything else.
-4. **Measured, not assumed.** Latency, pointing error, and hold duration are logged
-   quantities. No claim in the pitch that is not backed by a number in a log file.
+| Principle | Enforced by |
+|---|---|
+| Every ABC has ≥2 live implementations | `FrameSource`, `Detector`, `ActuatorDriver`, C2 client |
+| Human authority is a state, not a callback | `EngagementState.OPERATOR_AUTH` in the transition table |
+| Fail to safe, always | `_enter_idle()`, firmware deadman, `force_idle()` |
+| Measured, not assumed | `LatencyTracker` — lead time self-tunes at runtime |
 
 ---
 
-## 2. Hardware Topology
-
-Compute is split across a **Host** and an **Edge Actuator**, joined by a serial boundary.
+## 2. Topology
 
 ```
-┌───────────────────────────────────────────────┐
-│ HOST COMPUTE  (laptop/PC — Python 3.9+)       │
-│                                               │
-│  HBVCam-3M2111 V22 ──USB──▶ FrameGrabber      │
-│                              │ (grab-thread)  │
-│                              ▼                │
-│                        Vision Pipeline        │
-│                        (YOLO → track → KF)    │
-│                              │                │
-│   MQTT ◀──── C2 cue / operator auth           │
-│                              ▼                │
-│                        State Machine          │
-│                              │                │
-└──────────────────────────────┼────────────────┘
-                               │ USB-CDC / UART
-                    ASCII line protocol, 250 ms deadman
-                               ▼
-┌───────────────────────────────────────────────┐
-│ EDGE ACTUATOR  (ESP32-S3-WROOM-1, C++)        │
-│                                               │
-│  Parser ─▶ Bounds clamp ─▶ LEDC PWM ─▶ SG90×2 │
-│         └─▶ Laser gate ──▶ MOSFET ──▶ laser   │
-│         └─▶ Watchdog (kills laser on silence) │
-└───────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│ HOST COMPUTE  (Linux demo box / macOS dev)          │
+│                                                     │
+│  HBVCam-3M2111 V22 ──USB──▶ UsbCameraSource         │
+│       1280x720 MJPG @59.8fps  │ (frame-grabber)     │
+│       measured ~32ms capture  ▼                     │
+│                        UltralyticsDetector          │
+│                        YOLOv11 + ByteTrack          │
+│                               │                     │
+│                        AimpointSolver               │
+│                        AimpointPredictor            │
+│                               ▼                     │
+│   MQTT ◀── C2 cue / operator auth ── StateMachine   │
+│                               │                     │
+└───────────────────────────────┼─────────────────────┘
+                                │ UART bridge, 921600
+                     ASCII lines, 250 ms deadman
+                                ▼
+┌─────────────────────────────────────────────────────┐
+│ EDGE ACTUATOR  (ESP32-S3-WROOM-1, C++)              │
+│                                                     │
+│  Parser → checksum → bounds clamp → LEDC → SG90×2   │
+│         → arming interlock → effector gate → LED    │
+│         → deadman (254 ms measured)                 │
+│         → burn ceiling (2002 ms measured)           │
+└─────────────────────────────────────────────────────┘
 ```
 
-### Why split at all
+### Why the split exists
 
-The serial boundary is not an implementation detail — it is a **deliberate rehearsal of
-the real interface.** A military beam director is a separate subsystem behind a command
-link. By forcing our aiming commands through a constrained, latency-bearing, bandwidth-
-limited channel today, we prove the brain works without shared memory to the effector.
-That is the portability claim, demonstrated rather than asserted.
+The serial boundary is a **deliberate rehearsal of the real interface.** A military beam
+director is a separate subsystem behind a command link. By forcing aiming commands through
+a constrained, latency-bearing channel today, the brain is proven to work without shared
+memory to the effector.
 
-It also puts the safety-critical laser gate on a microcontroller that cannot be blocked
-by Python's GIL, a garbage-collection pause, or an OS scheduler decision.
+It also places the safety-critical gate on a microcontroller that **cannot be blocked by
+Python's GIL, a garbage-collection pause, or an OS scheduling decision.** This is the
+single most important structural property of the system: the host proposes, the firmware
+decides.
 
-### Pin map (ESP32-S3-WROOM-1)
+### Port selection
+
+Use the **UART bridge** (CP2102/CH340), not native USB-CDC. Native USB re-enumerates on
+every ESP32 reset, so the host's serial handle dies and pyserial raises. The bridge chip
+is independently powered and stays enumerated. At 921600 baud the link carries ~92 KB/s
+against a protocol that needs under 1 KB/s.
+
+### Pin map (locked)
 
 | Function | GPIO | Notes |
 |---|---|---|
-| Servo PAN (azimuth) | 5 | LEDC channel 0, 50 Hz |
-| Servo TILT (elevation) | 6 | LEDC channel 1, 50 Hz |
-| Laser gate | 7 | **10 kΩ external pulldown to GND, mandatory** |
-| Status LED | 48 | Onboard RGB on most S3 devkits; verify variant |
+| Servo PAN | 5 | LEDC ch 0, 50 Hz, 500–2400 µs |
+| Servo TILT | 6 | LEDC ch 1, 50 Hz |
+| Effector gate | 7 | 220 Ω → LED → GND, **10 kΩ pulldown to GND** |
 
-**Avoid:** GPIO 0, 3, 45, 46 (strapping pins — indeterminate at boot), GPIO 19/20 (native
-USB D-/D+), GPIO 26–32 (SPI flash/PSRAM; also 33–37 on octal-PSRAM variants).
+Avoid GPIO 0/3/45/46 (strapping), 19/20 (native USB), 26–32 (flash/PSRAM).
 
-**The pulldown is a safety requirement, not a preference.** Between power-on and the
-first line of `setup()`, every ESP32 GPIO is a floating input. A floating gate on a laser
-driver is an undefined output state. The resistor guarantees LOW through reset, reflash,
-brownout, and crash. See `guardrails.md` §2.
+**Power:** SG90s run from a separate 5 V supply with common ground to the ESP32. Two
+SG90s stall-draw ~700 mA each and will brown out a shared rail under load — i.e. during
+tracking, i.e. on stage.
 
-### Actuator characterisation — read this before tuning
+### Actuator characterisation
 
-The SG90 is a hobby servo and it is the **dominant pole of the control loop:**
+The SG90 is the dominant pole of the control loop:
 
-- **No position feedback.** Three wires, no output. Commanded angle is the only angle we
-  know. The actuator runs **open-loop**; the loop is closed optically, by the camera
-  observing the result.
-- ~100 ms per 60° of travel, plus startup deadband. Small corrections are disproportionately
-  slow relative to their size.
-- Deadband ≈ 5–10 µs pulse width → ~1–2° of commanded resolution that does nothing.
-- Jitter and buzz under load; no torque holding guarantee.
+- **No position feedback.** Commanded angle is the only angle known. The actuator runs
+  **open-loop**; the loop closes optically, through the camera.
+- ~100 ms per 60° travel plus startup deadband.
+- ~1–2° of commanded resolution does nothing (pulse-width deadband).
 
-Consequences, which propagate into every other document:
-1. The Kalman predictor must lead by the **full glass-to-photon latency**, including
-   mechanical travel — not just compute latency.
-2. `HOLD` tolerance (±15 px) must be wider than servo jitter, or the state will chatter.
-3. "Servo telemetry" means **commanded** position echoed by the ESP32. It is not a
-   measurement. Never present it as one.
+`ActuatorStatus.pan`/`.tilt` are **commanded**, never measured. Never present them as
+telemetry in a document a judge will read.
 
 ---
 
 ## 3. Serial Protocol
 
-Newline-terminated ASCII. Human-readable so it can be driven from a serial monitor during
-bring-up and debugged without tooling.
+Newline-terminated ASCII, readable from a serial monitor during bring-up.
 
 **Host → ESP32**
 
-| Command | Meaning |
-|---|---|
-| `A<pan>,<tilt>\n` | Absolute angle, degrees, 1 decimal. e.g. `A090.0,045.5` |
-| `L<0\|1>\n` | Laser gate. `L1` requires ARMED state + valid auth token |
-| `M<0\|1>\n` | Arm / disarm the laser subsystem |
-| `P\n` | Ping — refreshes the deadman timer |
-| `S\n` | Status request |
-| `Z\n` | **Emergency stop.** Laser LOW, servos hold, latch disarmed |
+| Command | Meaning | Checksum |
+|---|---|---|
+| `A<pan>,<tilt>` | Absolute angles, degrees | no |
+| `M1` / `M0` | Arm / disarm | **`M1` yes** |
+| `L1` / `L0` | Energise / de-energise | **`L1` yes** |
+| `P` / `S` / `Z` | Ping / status / e-stop | no |
 
 **ESP32 → Host**
 
 | Response | Meaning |
 |---|---|
-| `OK <echo>\n` | Command accepted and applied |
-| `ST <pan>,<tilt>,<laser>,<armed>,<uptime_ms>\n` | Status frame |
-| `ERR <code> <detail>\n` | Rejected — see guardrails §5 for codes |
+| `OK <echo>` | Accepted |
+| `ST <pan>,<tilt>,<laser>,<armed>,<uptime_ms>` | Status @ 10 Hz |
+| `ERR <code> <detail>` | Rejected, E01–E08 |
 
-**Transport note:** the ESP32-S3-WROOM-1 exposes both a native USB-OTG port (USB CDC,
-where the baud setting is nominal and ignored) and a UART bridge port on most devkits.
-Prefer **native USB CDC** — higher throughput, no bridge chip latency. If using the UART
-bridge, set 921600 baud. Confirm which port you are cabled into before tuning.
+### Asymmetric integrity
 
-**Deadman timer:** the ESP32 de-energises the laser if no valid command arrives within
-**250 ms**. The host sends `P` at minimum 10 Hz whenever armed. A host crash, a Python
-exception, an unplugged cable, or a hung GIL therefore all resolve to laser-off within
-a quarter second, without the host participating.
+Commands that **increase** hazard carry an XOR checksum: `M1*7C`, `L1*7D`. Commands that
+**decrease** hazard carry none and are accepted unconditionally.
+
+A corrupted byte can never fire the effector, because the checksum will not validate. A
+corrupted byte can never block a shutdown, because shutdowns are not validated at all.
+Combined with two-key arming, energising requires **two independently checksum-valid
+commands in order**.
 
 ---
 
-## 4. Software Components
+## 4. Concurrency Model
 
-### 4.1 Vision Module (`helper/vision/`)
-
-| Component | Responsibility |
-|---|---|
-| `FrameSource` (ABC) | Frame acquisition contract |
-| `UsbCameraSource` | `cv2.VideoCapture` + dedicated grab-thread (see below) |
-| `Detector` (ABC) | `detect(frame) -> list[Detection]` |
-| `UltralyticsDetector` | YOLO `.pt` via ultralytics — training/GPU path |
-| `OnnxDetector` | ONNX Runtime — portable/CPU deployment path |
-| `Tracker` | ByteTrack — identity persistence across frames and dropouts |
-| `AimpointSolver` | Bounding box + normalised offset → pixel aimpoint |
-| `TrajectoryPredictor` | Kalman filter — leads target by measured loop latency |
-
-**`Detection` is the widened contract.** The legacy `YOLOv5` ABC returned bare `(x, y)`
-centre tuples, discarding `w` and `h` at the point of computation. Weak-point offsetting
-is arithmetically impossible against that interface. The new contract carries the full
-box, confidence, class, and track ID.
-
-**Aimpoint solving:**
+Six threads. Three guarded handoffs. **No shared mutable dict** — the legacy
+`global_data` pattern, mutated from three threads with zero synchronisation, is gone.
 
 ```
-aim_x = x_center + (offset_x * w)
-aim_y = y_center + (offset_y * h)
+main ───────────── tick @100 Hz ── THE ONLY WRITER OF STATE
+  │                                        ▲
+  │  reads SnapshotHolder ────(Lock)───────┤
+  │  polls C2 inbox ──────────(Queue)──────┤
+  │  writes actuator ─────────(Lock)───────┘
+  │
+vision-worker ──── detect → track → solve → publish snapshot
+frame-grabber ──── inside UsbCameraSource; newest-frame-wins
+mqtt-network ───── paho; validate → enqueue → return
+serial-reader ──── inside SerialActuator; parses ST/OK/ERR
+serial-heartbeat ─ inside SerialActuator; refreshes firmware deadman @10 Hz
 ```
 
-`offset = (0.0, 0.0)` is centre-of-mass. `(-0.35, -0.35)` biases toward a forward rotor
-hub; `(0.0, 0.4)` toward a slung payload. Offsets are clamped to ±0.5 so the aimpoint can
-never leave the detected box.
+### Thread contracts
 
-**Resolution gate — mandatory.** The offset only carries information when it exceeds
-frame-to-frame box jitter. Below a configured minimum box dimension the solver reverts to
-centre-of-mass and reports the downgrade. Aiming at a sub-component of a 10-pixel box is
-aiming at noise, and claiming otherwise is the fastest way to lose a technical panel.
-
-**Zero-latency frame acquisition.** `cv2.CAP_PROP_BUFFERSIZE = 1` is honoured by the V4L2
-and DSHOW backends and **ignored by AVFoundation on macOS.** It is set as a best-effort
-hint, but the load-bearing mechanism is a daemon thread calling `cap.grab()` continuously
-and `cap.retrieve()` only when the pipeline asks. Stale frames are discarded inside the
-driver. This is platform-independent and is the only mechanism we rely on.
-
-Also request MJPG explicitly (`CAP_PROP_FOURCC`). UVC cameras default to YUYV, which
-saturates USB 2.0 bandwidth and collapses to ~5 fps at higher resolutions.
-
-### 4.2 Comms Module (`helper/comms/`)
-
-MQTT is the **C2 plane** — cueing and authorisation only. It is never in the inner
-control loop.
-
-| Topic | Dir | Payload | Effect |
-|---|---|---|---|
-| `c2/radar/slew_to_cue` | in | `{"azimuth": float, "elevation": float, "target_id": str}` | `IDLE` → `SCAN` |
-| `c2/operator/auth` | in | `{"auth": bool, "target_id": str, "token": str}` | `OPERATOR_AUTH` → `ENGAGE` |
-| `c2/node/telemetry` | out | state, track, pointing error, latency | Situational awareness |
-| `c2/node/event` | out | State transitions, engagements, faults | Audit trail |
-
-Every inbound payload is schema-validated and range-checked before it can influence
-state. The legacy code's comment — *"Only valid messages should be received, so no need
-to make checks"* — sat directly above the handler that could switch on a laser. See
-`guardrails.md` §5.
-
-### 4.3 Hardware Interface Module (`helper/hardware/`)
-
-| Component | Responsibility |
-|---|---|
-| `ActuatorDriver` (ABC) | Gimbal + effector contract |
-| `SerialActuator` | ESP32-S3 over pyserial; owns the write lock and heartbeat |
-| `MockActuator` | In-memory; records command history for tests |
-
-`MockActuator` is not a testing nicety — it is the **second implementation that proves the
-abstraction is real.** Two backends means an architecture; one means a claim.
-
----
-
-## 5. Data & Control Flow — Engagement Lifecycle
-
-```
-[1] C2 CUE          MQTT c2/radar/slew_to_cue → validate → IDLE transitions to SCAN
-     │
-[2] SLEW            Cue az/el → gimbal angles → SerialActuator → ESP32 → servos
-     │
-[3] ACQUIRE         Grab-thread → latest frame → Detector → Detection[]
-     │              No detection before timeout → back to IDLE
-     ▼
-[4] TRACK           Tracker assigns stable ID across frames
-     │              AimpointSolver applies offset → pixel aimpoint
-     │              Predictor leads by measured glass-to-photon latency
-     │              Error → control law → incremental angle → ESP32
-     ▼
-[5] HOLD            Error inside ±15 px → start hold timer
-     │              Error exits band OR track lost → timer resets, back to TRACK
-     │              3.0 s continuous → firing solution is valid
-     ▼
-[6] OPERATOR_AUTH   Publish solution, await c2/operator/auth
-     │              Gimbal keeps tracking throughout — the target does not wait
-     │              Lock lost or auth timeout → back to TRACK or SCAN, never ENGAGE
-     ▼
-[7] ENGAGE          Arm → L1 → 2.0 s burn, tracking continues → L0 → disarm
-     │              Log time-on-target, mean/peak error, total latency
-     ▼
-[8] IDLE            Laser confirmed LOW, servos safed, audit record written
-```
-
-**Invariant:** the laser is energised only inside step 7, only after step 6 returned an
-affirmative authorisation bound to the same `target_id` tracked since step 4.
-
----
-
-## 6. The State Machine
-
-Single authoritative `EngagementState` enum. All transitions go through one guarded
-method holding a `threading.RLock`. No component mutates state directly.
-
-| State | Entry action | Valid exits | Fail-safe |
-|---|---|---|---|
-| `IDLE` | Laser LOW, disarm, servos to stow | → `SCAN` on validated C2 cue | Terminal safe state; all faults land here |
-| `SCAN` | Slew to cued az/el, begin search | → `TRACK` on detection<br>→ `IDLE` on timeout (30 s) | Bounded sweep; never reverses into a bound (see §7) |
-| `TRACK` | Engage control law on aimpoint | → `HOLD` on error in band<br>→ `SCAN` on track loss > 1.0 s<br>→ `IDLE` on op abort | Laser stays LOW throughout |
-| `HOLD` | Start hold timer | → `OPERATOR_AUTH` at 3.0 s continuous<br>→ `TRACK` on error excursion | **Timer resets on any excursion — never accumulates across breaks** |
-| `OPERATOR_AUTH` | Publish solution, await auth | → `ENGAGE` on valid auth<br>→ `TRACK` on lock loss<br>→ `IDLE` on deny/timeout (10 s) | Continues tracking while waiting; auth is bound to `target_id` |
-| `ENGAGE` | Arm, laser HIGH, burn timer | → `IDLE` at 2.0 s or on any fault | **Hard ceiling. Any exception, lock loss, or serial fault cuts the beam immediately** |
-
-**Transition rules:**
-- Undeclared transitions raise `IllegalTransitionError` and force `IDLE`.
-- Every transition is timestamped and published to `c2/node/event`.
-- `ENGAGE` is reachable from exactly one predecessor. Non-negotiable.
-
----
-
-## 7. Sweep Logic (legacy bug, corrected)
-
-The legacy `scan_handle_x` called `turn_servo_x(+rate)` in **both** bounds-recovery
-branches (`main_helper.py:51` and `:59`), so hitting the upper bound pushed the servo
-further into it. Corrected logic:
-
-1. Step in the current direction.
-2. If the **next** step would exceed a bound, do not take it.
-3. Flip direction, step the orthogonal axis one row, resume.
-4. Maintain a sweep-cycle counter; N complete cycles without detection → `IDLE`.
-
-Bounds are enforced **twice** — host-side before transmission, and again on the ESP32
-before PWM write. Host-side alone is one bug away from a stalled servo.
-
----
-
-## 8. Latency Budget
-
-Targets for the demo configuration. **Replace every figure with a measurement before it
-goes near a slide.**
-
-| Stage | Budget | Notes |
+| Thread | Owns | Must not |
 |---|---|---|
-| Camera exposure + USB transfer | ~33 ms | 640×480 MJPG @ 30 fps |
-| Grab + decode | ~5 ms | Grab-thread; not in critical path |
-| YOLO inference | 10–80 ms | GPU ~10–15 ms; laptop CPU 40–80 ms |
-| Tracker update | 1–3 ms | ByteTrack |
-| Predict + aimpoint + control | < 1 ms | |
-| Serial TX + ESP32 parse | 2–5 ms | Native USB CDC |
-| **Subtotal — glass to serial write** | **~50–125 ms** | **The figure the software owns** |
-| SG90 mechanical response | 20–150 ms | Travel-dependent; no feedback |
-| **Total — glass to photon on target** | **~70–275 ms** | **The figure that matters operationally** |
+| **main** | `EngagementState`, engagement bookkeeping | Block on I/O; `time.sleep` inside a handler |
+| **vision-worker** | Detector, tracker, solver | Touch state directly or command the actuator |
+| **frame-grabber** | `cv2.VideoCapture`, latest frame | Touch state or actuator |
+| **mqtt-network** | Inbound validation | Do work — enqueue and return |
+| **serial-reader** | Inbound frame parsing | Touch state |
+| **serial-heartbeat** | Deadman refresh | Touch state |
 
-Quote both, and say which is which. The software number is the portable one; the
-mechanical number is an artefact of a US$3 servo and is exactly what a real beam director
-replaces. That framing turns your worst measurement into evidence for the thesis.
+### The three guarded handoffs
+
+**`StateMachine`** — `threading.RLock`. Every transition passes through one guarded
+method. Reentrant so an `on_transition` callback can read state without deadlocking.
+No component assigns state directly.
+
+**`SnapshotHolder`** — `threading.Lock`, single slot, overwrite-not-queue. The vision
+worker publishes `TrackSnapshot`; the main thread reads the latest. A queued result is a
+stale result, and stale results drive the gimbal to where the target used to be. Each
+snapshot is immutable and carries `captured_at` / `processed_at`, so the state machine
+reasons about **age explicitly** rather than assuming freshness.
+
+**C2 inbox** — bounded `queue.Queue(64)`. Backpressure surfaces as dropped stale cues,
+never as memory growth or a blocked MQTT client.
+
+### Why vision runs on its own thread
+
+Inference at 40–80 ms would stall the tick loop, and the tick loop enforces every
+fail-safe: HOLD timer, auth timeout, burn ceiling, liveness. Decoupling lets the state
+machine run at 100 Hz regardless of model speed. The cost is that the state machine sees
+results up to one tick (10 ms) late, which is inside the latency budget and is measured
+by `LatencyTracker` anyway.
 
 ---
 
-## 9. Known Architectural Limits
+## 5. The State Machine
 
-Stated here so they are never discovered by a judge first.
+```python
+class EngagementState(str, Enum):
+    IDLE = "IDLE"; SCAN = "SCAN"; TRACK = "TRACK"
+    HOLD = "HOLD"; OPERATOR_AUTH = "OPERATOR_AUTH"; ENGAGE = "ENGAGE"
+```
+
+### Transition table
+
+| State | → Legal | Trigger | Fail-safe |
+|---|---|---|---|
+| `IDLE` | `SCAN` | Validated `slew_to_cue`, azimuth inside gimbal arc | Effector confirmed LOW, disarmed, stowed, inbox drained, tracker reset |
+| `SCAN` | `TRACK`, `IDLE` | Detection acquired / 30 s timeout / search volume covered | Bounded sweep; never steps into a bound |
+| `TRACK` | `HOLD`, `SCAN`, `IDLE` | Error ≤ 15 px / target lost > 1.0 s | Effector LOW throughout |
+| `HOLD` | `OPERATOR_AUTH`, `TRACK`, `SCAN`, `IDLE` | 3.0 s continuous in band / excursion / identity switch | **Timer resets on any excursion — never accumulates** |
+| `OPERATOR_AUTH` | `ENGAGE`, `TRACK`, `SCAN`, `IDLE` | Valid auth / denial / 10 s timeout / lock loss | Tracking continues while waiting; auth bound to `target_id`; nonce single-use |
+| `ENGAGE` | `IDLE` | 2.0 s burn / lock loss / any fault | **Beam cut immediately on lock loss — no coasting** |
+
+### Two encoded invariants
+
+1. **`ENGAGE` has exactly one predecessor**, `OPERATOR_AUTH`. Enforced by the table,
+   asserted by `test_engage_has_exactly_one_predecessor`.
+2. **`IDLE` is reachable from everywhere** — the universal safe harbour. Asserted by
+   `test_idle_is_reachable_from_every_state`.
+
+Undeclared transitions raise `IllegalTransitionError`, which the tick loop catches and
+answers by forcing `IDLE`. `force_idle()` is the only bypass in the system, and it only
+ever moves toward safety.
+
+### Engagement lifecycle
+
+```
+[1] CUE        slew_to_cue → validate → cue_to_gimbal → IDLE→SCAN
+                 (azimuth outside the ±90° arc is REJECTED, not clamped)
+[2] SLEW       boustrophedon sweep, bounded by max_cycles
+[3] ACQUIRE    YOLOv11 → ByteTrack → select_priority_target → SCAN→TRACK
+[4] TRACK      AimpointSolver → AimpointPredictor leads by measured latency
+                 → compute_correction → SerialActuator → ESP32
+[5] HOLD       error ≤15 px continuously for 3.0 s → publish firing solution
+[6] AUTH       await c2/operator/auth bound to target_id, nonce unused
+[7] ENGAGE     arm → L1 → burn, tracking throughout → L0 → disarm → confirm
+[8] IDLE       metrics logged, audit event published
+```
+
+---
+
+## 6. Latency Budget (measured where possible)
+
+| Stage | Figure | Source |
+|---|---|---|
+| Camera exposure + USB transfer | ~16.7 ms | measured, 59.8 fps @720p MJPG |
+| Driver latency | ~15 ms | measured |
+| **Capture subtotal** | **~32 ms** | **measured** |
+| YOLOv11 inference | 10–80 ms | device-dependent; measured live by `LatencyTracker` |
+| Track + solve + control | < 3 ms | |
+| Serial TX + ESP32 parse | ~3 ms | |
+| **Glass → serial write** | **measured at runtime** | `LatencyTracker.compute_latency_s` |
+| SG90 mechanical | ~60 ms allowance | **estimated — not measurable, no feedback** |
+| **Glass → photon** | **`total_lead_s`** | compute (measured) + mechanical (estimated) |
+
+`LatencyTracker` maintains an EWMA of real capture-to-command intervals and feeds it
+straight into the predictor's lead time. Quote the compute figure as measured and the
+mechanical figure as estimated — the distinction is the credibility.
+
+---
+
+## 7. Repo Layout
+
+```
+main.py                      entry point, wiring, tick loop, state handlers
+config/bench.yaml            every tunable
+helper/
+  vision/  types.py          Detection, AimPoint
+           frame_source.py   FrameSource ABC, UsbCameraSource, MockFrameSource
+           detector.py       Detector ABC, UltralyticsDetector, ScriptedDetector
+           aimpoint.py       AimpointSolver, target selection, pointing error
+           predictor.py      AimpointPredictor, LatencyTracker
+  comms/   schemas.py        payload validation
+           mqtt_client.py    C2Client, MockC2Client
+  hardware/protocol.py       wire format, bounds, checksum, ActuatorStatus
+           actuator.py       ActuatorDriver ABC, SerialActuator, MockActuator
+  state/   machine.py        EngagementState, StateMachine, SnapshotHolder
+           sweep.py          SweepController, cue_to_gimbal
+           control.py        compute_correction — shared by node and simulator
+firmware/esp32_actuator/     C++ — the safety authority
+tools/                       camera_probe, serial_probe, operator_console, simulator
+tests/                       hardware-free
+```
+
+---
+
+## 8. Known Architectural Limits
+
+Stated here so a judge never discovers them first.
 
 1. **Open-loop actuator.** No true position feedback. The loop closes optically only.
-2. **Monocular — no range.** Bearing-only. Cannot compute time-to-target, true size, or
-   slant range. Aimpoint offsets are angular, not metric.
+2. **Monocular — no range.** Bearing-only. No time-to-target, no slant range, no true
+   target size. Aimpoint offsets are angular, not metric.
 3. **Aimpoint offset is geometric, not semantic.** It biases within a box. It does not
-   identify a rotor hub. A trained keypoint model behind the same interface would — that
-   is future work, and must be described as such.
-4. **Visible-spectrum only.** No night, no degraded visibility, no hit-spot verification.
-5. **Single node.** No multi-node deconfliction or fire distribution.
-6. **MQTT unauthenticated at transport in the demo config.** Payload validation and auth
-   tokens are application-layer. Production requires mTLS. See `guardrails.md` §5.
+   identify a rotor hub. A trained keypoint model behind the same interface would.
+4. **180° pan arc.** Cues outside ±90° of boresight are rejected, not serviced.
+5. **Visible spectrum only.** No night, no degraded visibility, no hit-spot verification.
+6. **Single node.** No multi-node deconfliction or fire distribution.
+7. **MQTT unauthenticated at transport in the demo config.** Payload validation and auth
+   tokens are application-layer. Production requires mTLS.

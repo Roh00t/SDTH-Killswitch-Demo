@@ -78,6 +78,10 @@ c2:
   # acceptable ONLY on an isolated demo network and must be stated as such.
   auth_token: "sdth-demo-token"
 
-display:
+# Annotated video link to tools/operator_console.py. The node owns the camera,
+# so the console cannot open it — two processes cannot share a USB device.
+video:
   enabled: true
-  window_name: "Killswitch"
+  fps: 15
+  max_width: 640
+  quality: 60

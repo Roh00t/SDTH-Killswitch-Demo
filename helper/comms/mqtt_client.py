@@ -231,6 +231,13 @@ class C2Client:
         """
         self._publish(TOPIC_NODE_EVENT, {"event": event, **detail}, qos=1)
 
+    def publish_raw(self, topic: str, payload: bytes, qos: int = 0) -> None:
+        """Publish raw bytes (the video link). QoS 0 — never blocks the loop."""
+        try:
+            self._client.publish(topic, payload, qos=qos)
+        except (OSError, ValueError) as exc:
+            logger.debug("Raw publish to %s failed: %s", topic, exc)
+
     def _publish(self, topic: str, body: dict, qos: int) -> None:
         payload = json.dumps({"node_id": self._node_id, "ts": time.time(), **body})
         try:
@@ -317,3 +324,6 @@ class MockC2Client:
 
     def publish_event(self, event: str, detail: dict) -> None:
         self.published.append(("event", event, detail))
+
+    def publish_raw(self, topic: str, payload: bytes, qos: int = 0) -> None:
+        self.published.append(("raw", topic, len(payload)))

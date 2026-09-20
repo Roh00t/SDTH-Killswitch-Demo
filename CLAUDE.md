@@ -2,7 +2,7 @@
 
 Guidance for Claude Code working in this repository.
 
-> **Read `architecture.md` and `guardrails.md` before making structural changes.**
+> Read `architecture.md` and `guardrails.md` before structural changes.
 > `guardrails.md` is safety-critical and overrides convenience in every case.
 
 ---
@@ -10,45 +10,38 @@ Guidance for Claude Code working in this repository.
 ## Project Identity
 
 **Killswitch** — a Software-Defined Directed Energy (SDDE) Counter-UAS node for the
-Singapore Defence Tech Hackathon. It is the **targeting brain, not the turret**: an
-open, hardware-agnostic software layer that finds, tracks, predicts and holds a beam on a
-manoeuvring drone, running on COTS hardware.
+Singapore Defence Tech Hackathon. It is the **targeting brain, not the turret**: an open,
+hardware-agnostic layer that finds, tracks, predicts and holds a beam on a manoeuvring
+drone, running on COTS hardware and gated by a human authorisation state.
 
-The repo is an in-progress refactor of a legacy Raspberry Pi bird-deterrent
-(`dragonstonehafiz/inf2009-project`, see the `upstream` remote). Legacy code is being
-replaced, not extended. If you find `picamera2`, `gpiozero`, `pigpio`, microphone/audio
-triggering, or `helper/sound.py` — that is legacy and slated for deletion, not a pattern
-to follow.
+Refactored from a legacy Raspberry Pi bird deterrent (`upstream` remote). Legacy code is
+being deleted, not extended. `picamera2`, `gpiozero`, `pigpio`, audio triggering and the
+`YoloV5_*` wrappers are all legacy — not patterns to follow.
 
-**This system points a laser.** Changes touching the effector path, the state machine, or
-MQTT input handling are safety-critical.
+**This system commands a physical effector.** Changes to the effector path, the state
+machine, or MQTT input handling are safety-critical.
 
 ---
 
-## Hardware (actual, as built)
+## Hardware (as built)
 
 | Role | Part |
 |---|---|
-| Host compute | Laptop/PC (macOS dev, Python 3.9+) |
-| Edge actuator | ESP32-S3-WROOM-1 (C++/Arduino) |
-| Gimbal | 2× SG90 micro servo, pan + tilt |
-| Camera | HBVCam-3M2111 V22 (USB UVC) |
-| Effector | Low-power proxy laser via MOSFET |
+| Host | Laptop/PC — Linux demo box, macOS dev |
+| Edge actuator | ESP32-S3-WROOM-1, UART bridge @921600 |
+| Gimbal | 2× SG90, pan GPIO 5 / tilt GPIO 6, separate 5 V rail |
+| Camera | HBVCam-3M2111 V22 — 1280×720 MJPG @59.8 fps measured |
+| Effector | Proxy LED, GPIO 7, 10 kΩ pulldown |
 
-Model training runs on **Google Colab**; weights land here as `.pt` / `.onnx` and are
-**gitignored**. Never commit weights.
+Weights train on **Google Colab**, land as `.pt`/`.onnx`, and are **gitignored**.
 
 ---
 
 ## Tech Stack
 
-- **Python 3.9+** — host pipeline
-- **OpenCV** — capture and frame ops
-- **Ultralytics YOLO** (`.pt`, GPU/training) and **ONNX Runtime** (`.onnx`, portable CPU)
-- **ByteTrack** — multi-object tracking, identity persistence
-- **paho-mqtt < 2.0** — C2 plane (API differs in 2.x; pin it)
-- **pyserial** — host ↔ ESP32
-- **C++/Arduino** — ESP32-S3 firmware (`ESP32Servo`, LEDC PWM)
+Python 3.9+ · OpenCV · Ultralytics YOLOv11 + ByteTrack · `paho-mqtt<2.0` (2.x changed
+callback signatures — do not unpin) · pyserial · PyYAML · pytest · C++/Arduino
+(`ESP32Servo`, LEDC).
 
 ---
 
@@ -58,127 +51,115 @@ Model training runs on **Google Colab**; weights land here as `.pt` / `.onnx` an
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-python main.py --config config/bench.yaml          # full node
-python main.py --config config/bench.yaml --mock   # no hardware, mock actuator
-python -m tools.camera_probe                       # enumerate modes, measure fps
-python -m tools.serial_probe                       # ESP32 link check
-pytest tests/ -v                                   # all tests, hardware-free
-pytest tests/test_state_machine.py -v              # state machine only
+python main.py --config config/bench.yaml           # full node
+python main.py --config config/bench.yaml --mock    # no hardware at all
+python -m tools.camera_probe                        # modes, real fps, BUFFERSIZE
+python -m tools.serial_probe --port <dev>           # every firmware interlock
+python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
+python -m tools.simulator                           # closed-loop convergence proof
+pytest tests/ -q                                    # 119 tests, zero hardware
 ```
 
-All commands run **from the repo root**. Package dirs have `__init__.py`; the legacy
-`helper/` did not, which is why legacy scripts only worked from root by accident.
+Run everything **from the repo root**.
 
 ---
 
 ## Architectural Rules
 
-These are not style preferences. Violating them has caused real bugs in this repo.
+Not style preferences — each one has a real bug behind it.
 
-1. **No global mutable state.** The legacy `global_data` dict was mutated from the main
-   loop, a model thread, and MQTT callbacks with zero synchronisation. Gone. State lives
-   in owning classes; anything crossing a thread boundary is guarded by a lock.
+1. **No global mutable state.** The legacy `global_data` dict was mutated from three
+   threads unsynchronised. State lives in owning classes; anything crossing a thread
+   boundary is lock-guarded.
 
-2. **State transitions go through one guarded method.** `EngagementState` is a `StrEnum`.
-   All changes route through the state machine's transition method holding a
-   `threading.RLock`. No component assigns state directly. Undeclared transitions raise.
+2. **One writer of state.** `EngagementState` changes only via
+   `StateMachine.transition_to()` holding an `RLock`. Undeclared transitions raise.
+   `force_idle()` is the sole bypass and only moves toward safety.
 
-3. **Strict separation of concerns.** Vision does not touch serial. Comms does not touch
-   the actuator. The state machine orchestrates; it does not implement.
+3. **Three guarded handoffs, no more.** `StateMachine` (RLock), `SnapshotHolder` (Lock),
+   C2 inbox (bounded Queue). Do not add a fourth without a documented reason.
 
-4. **Every ABC has ≥2 live implementations.** One real, one mock. An abstraction with a
-   single implementation is an unverified claim — and hardware agnosticism *is* the pitch.
+4. **MQTT callbacks validate and enqueue. They never act.** Paho dispatches on its own
+   thread; a blocked callback stalls the client.
 
-5. **Zero-latency capture is a grab-thread, not a property.** Set
-   `cv2.CAP_PROP_BUFFERSIZE = 1` as a hint, but never rely on it: **it is ignored by
-   AVFoundation on macOS** (V4L2/DSHOW only). The load-bearing mechanism is a daemon
-   thread spinning `cap.grab()` with `retrieve()` on demand. Also request MJPG via
-   `CAP_PROP_FOURCC` — UVC defaults to YUYV and collapses to ~5 fps.
+5. **Every ABC has ≥2 live implementations.** One real, one mock. The whole test suite
+   runs on mocks — that is the hardware-agnosticism claim, demonstrated.
 
-6. **The effector fails safe.** Laser LOW is the default in every state, every error path,
-   every exception handler, and on the ESP32's 250 ms deadman timeout. See
-   `guardrails.md` §2.
+6. **Mocks mirror firmware exactly.** `MockActuator` once raised on arm-after-e-stop
+   while the firmware's checksummed `M1` cleared the latch. The mock was validating
+   fiction. If firmware behaviour changes, change the mock in the same commit.
 
-7. **Bounds are enforced twice.** Host-side before transmit, ESP32-side before PWM write.
+7. **Zero-latency capture is a grab thread, not a property.** `CAP_PROP_BUFFERSIZE = 1`
+   is honoured by V4L2/DSHOW and **ignored by AVFoundation on macOS**. It is set as a
+   hint; the load-bearing mechanism is the newest-frame-wins reader thread.
 
-8. **MQTT input is hostile until validated.** Schema, type, and range check every payload
-   before it can influence state.
+8. **The effector fails safe.** LOW is the default in every state, every error path,
+   every exception handler, and on the firmware's 250 ms deadman.
+
+9. **Bounds enforced twice** — host-side before transmit, firmware before PWM write.
+
+10. **Control law lives in one place.** `helper/state/control.py::compute_correction` is
+    shared by the node and the simulator. If they diverge, the simulator proves nothing.
 
 ---
 
 ## Coding Standards
 
 - **Type hints on every signature**, including returns. `Detection`, `AimPoint`,
-  `EngagementState` are the shared vocabulary — use them, don't pass raw tuples.
-- **No silent broad excepts.** `except Exception: print(...)` and continue is banned —
-  it masked four real defects in the legacy code. Catch narrow, log with context, and
-  either handle meaningfully or transition to `IDLE`. If you truly must catch broad,
-  log the traceback and transition to a safe state.
-- **Docstrings on every public class and method**: purpose, args, returns, raises, and
-  thread-safety. Say explicitly which thread a method is expected to be called from.
-- **`dataclass` for data, `Enum` for closed sets.** No dict-as-struct.
-- **Constants at module top or in config.** No magic numbers inline. Tunables
-  (thresholds, timeouts, offsets, pins) belong in YAML config, not in code.
-- **Log state transitions and every effector command.** The audit trail is a deliverable.
+  `EngagementState`, `TrackSnapshot` are the shared vocabulary — never raw tuples.
+- **Strict Enums for closed sets**, `@dataclass(frozen=True)` for data. No dict-as-struct.
+- **No silent broad excepts.** `except Exception: print(); continue` masked four real
+  defects in the legacy code. Catch narrow, log with context, and either handle
+  meaningfully or transition to IDLE. The single permitted broad catch is the top-level
+  tick guard, which **de-energises first, then logs, then forces IDLE**.
+- **Docstrings** on every public class and method: purpose, args, returns, raises, and
+  **which thread is expected to call it**.
+- **`time.monotonic()` for all durations.** `time.time()` steps with NTP; a clock jump
+  must not extend or truncate a burn.
+- **Tunables live in `config/bench.yaml`.** No magic numbers inline.
 
 ---
 
-## Platform Gotchas
+## Context for Future Sessions
 
-- `CAP_PROP_BUFFERSIZE` is a no-op on macOS — see rule 5.
-- ESP32-S3-WROOM-1 has **both** native USB-CDC and a UART bridge. Prefer native USB
-  (baud is nominal). Know which port you are cabled into before debugging latency.
-- GPIO 0, 3, 45, 46 are strapping pins; 19/20 are native USB; 26–32 are flash/PSRAM.
-  Do not assign peripherals there.
-- The laser GPIO needs a **10 kΩ external pulldown**. GPIOs float during boot and reflash.
-- SG90s have **no position feedback**. Reported angle is *commanded*, never measured.
-  Never describe it as telemetry in a document a judge will read.
-- `paho-mqtt` 2.x changed the callback signature. Pin `<2.0`.
+Two design decisions that look odd without their history:
 
----
+**`AimPoint` carries provenance, not just coordinates.** Every solution records
+`downgraded`, `offset_applied`, `reason` and `track_id`. The resolution gate silently
+reverts weak-point biasing to centre-of-mass when the box is smaller than
+`min_box_px` — because an offset smaller than box jitter aims at noise. Without
+provenance the audit log could not distinguish "we aimed at the rotor hub" from "we
+wanted to and couldn't." Preserve these fields; the firing-solution event publishes them.
+`track_id` also binds authorisation: auth for track 7 must never fire on track 9.
 
-## Repo Layout (target)
+**The velocity estimator is explicit, not ByteTrack's.** ByteTrack maintains a Kalman
+filter per track, but reaching it means `model.predictor.trackers[0].tracked_stracks[i].mean`
+— private API whose shape shifts between ultralytics releases. `AimpointPredictor` is an
+EWMA-smoothed finite-difference estimator on the **aimpoint** (not the box centre, because
+the aimpoint is what we drive to). It is version-independent and unit-tested. Do not
+"simplify" it back to the tracker's internals.
 
-```
-main.py                    # entry point, wiring only
-config/                    # YAML — thresholds, pins, topics, offsets
-helper/
-  vision/                  # FrameSource, Detector, Tracker, AimpointSolver, Predictor
-  comms/                   # MQTT client, payload schemas + validation
-  hardware/                # ActuatorDriver ABC, SerialActuator, MockActuator
-  state/                   # EngagementState enum, guarded StateMachine
-firmware/esp32_actuator/   # C++ — parser, bounds clamp, deadman, laser gate
-tests/                     # hardware-free; mocks for camera, serial, MQTT
-tools/                     # camera_probe, serial_probe, latency_bench
-```
+**`LatencyTracker` self-tunes the lead time.** It samples every processed snapshot, not
+only those that produce a command — a target sitting inside the deadband would otherwise
+never update the estimate. `compute_latency_s` is measured; `mechanical_allowance_s` is
+an estimate because SG90s have no position feedback. Keep that distinction in any output
+a human reads.
 
 ---
 
 ## Testing
 
-The legacy repo had **zero automated tests**; several shipped defects would each have
-been caught by one. Non-negotiable coverage:
+119 tests, all hardware-free, ~0.1 s.
 
-- State machine transitions, including every illegal transition and fail-safe.
-- `HOLD` timer reset on error excursion (must not accumulate across breaks).
-- Aimpoint offset math, including clamping and the resolution-gate downgrade.
-- Sweep bounds — specifically that hitting a bound reverses instead of pushing into it.
-- MQTT payload validation, including malformed, out-of-range, and hostile inputs.
-- Serial framing and the deadman timeout.
+| File | Covers |
+|---|---|
+| `test_aimpoint.py` | Offset math, clamping, resolution gate, target selection |
+| `test_comms.py` | Payload validation, hostile inputs, token handling |
+| `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop |
+| `test_state_machine.py` | Transition table, sweep bounds, cue geometry, prediction |
+| `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
 
-All tests run **without hardware attached** via `MockActuator` and synthetic frames.
-
----
-
-## Legacy Status
-
-Being removed: `helper/PiCameraInterface.py`, `helper/sound.py`, `helper/RaspberryPiZero2.py`,
-`helper/Arduino.py`, `calibrate.py`, `sound/`, `model/bird_sound_model.onnx`,
-`model/yolov5n_*.onnx`.
-
-Known legacy defects — do not reintroduce these patterns:
-- Init race: worker thread started before the board it calls was assigned.
-- `UnboundLocalError` from a variable assigned only inside conditional branches.
-- Sweep reversal pushing the servo further into its bound.
-- `conf_thres` accepted as a parameter then ignored in favour of a hardcoded value.
-- Centre/corner box-format mismatch fed to NMS.
+**Unit tests are necessary but not sufficient.** Five real bugs were found only by running
+the whole node in mock mode — duration logging, mock free-running, wrong teardown verb,
+nominal completion logged as FORCED, and latency never sampling. Run
+`python main.py --mock` after touching the tick loop.
