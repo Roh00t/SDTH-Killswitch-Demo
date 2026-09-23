@@ -13,7 +13,7 @@ class PhysicsParams:
     laser_power_w: float = 5000.0          # 5 kW source power
     engagement_range_m: float = 350.0       # 350 m tactical engagement distance
     atm_attenuation_coeff: float = 0.0008  # Beer-Lambert gamma at 1.55 um (1/m)
-    boresight_jitter_deg: float = 0.88     # Boresight alignment error (deg)
+    boresight_jitter_deg: float = 0.282     # Boresight alignment error (deg)
     optical_absorption: float = 0.85       # Polycarbonate absorption at 1.55 um
 
     # Material Properties (Polycarbonate / Nylon 6,6 Rotor Junction)
