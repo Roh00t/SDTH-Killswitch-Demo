@@ -94,11 +94,17 @@ under-damped. Every number in the pitch traces to a log file.
 ---
 ## Target Effects & Thermal Kill Chain
 
-The `Killswitch` software architecture enforces a strict 3.0-second continuous hold (`HOLD` state) before operator authorization is requested. This window is derived mathematically against standard commercial drone polycarbonates.
+The `Killswitch` software architecture enforces a strict 3.0-second continuous track (`HOLD` state) before operator authorization is requested. This temporal gate is mathematically derived against standard commercial C-UAS polycarbonates to guarantee structural failure.
 
 ![Thermal Kill Chain](docs/thermal_kill_chain.png)
 
-Based on a simulated 5 kW optical load targeting a 0.785 cm² rotor junction area, continuous track maintenance initiates material phase change (melting) at **~1.12 seconds**. Structural failure of the target frame is achieved well within the software's mandatory 3.0-second gate.
+**Simulation Parameters:**
+* **Optical Load:** 5 kW at 1.55 µm (Atmospheric Attenuation: $\gamma = 0.0008$)
+* **Engagement Range:** 350 meters
+* **Boresight Jitter:** 0.282° (4.9 mrad)
+* **Target Material:** Polycarbonate / Nylon 6,6 ($T_{melt} = 260^\circ\text{C}$)
+
+Accounting for beam divergence and 1D Fourier heat conduction, continuous track maintenance initiates material phase change (melting) at **1.11 seconds**. The 3.0-second software gate ensures a >2x safety margin for complete rotor junction failure before the system disengages.
 
 ## Hardware
 
