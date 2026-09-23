@@ -92,6 +92,13 @@ closed-loop simulator proved the shipped gain (`Kp=0.6`) is stable and that `Kpâ
 under-damped. Every number in the pitch traces to a log file.
 
 ---
+## Target Effects & Thermal Kill Chain
+
+The `Killswitch` software architecture enforces a strict 3.0-second continuous hold (`HOLD` state) before operator authorization is requested. This window is derived mathematically against standard commercial drone polycarbonates.
+
+![Thermal Kill Chain](docs/thermal_kill_chain.png)
+
+Based on a simulated 5 kW optical load targeting a 0.785 cmÂ² rotor junction area, continuous track maintenance initiates material phase change (melting) at **~1.12 seconds**. Structural failure of the target frame is achieved well within the software's mandatory 3.0-second gate.
 
 ## Hardware
 
