@@ -57,7 +57,6 @@ desktop.ini
 # model/README.md documents expected filenames, provenance and per-class metrics.
 *.pt
 *.pth
-*.onnx
 *.engine
 *.tflite
 *.weights
