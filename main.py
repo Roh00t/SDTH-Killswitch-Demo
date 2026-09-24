@@ -123,6 +123,7 @@ class KillswitchNode:
         self._audit = AuditLog(node_id=config["node"]["id"])
         self._video: Optional[VideoPublisher] = None
         self._shutdown_done = False
+        self._telemetry_limiter = _RateGate(hz=5.0)
 
         # Engagement bookkeeping. Owned by the main thread only.
         self._commanded: Tuple[float, float] = (
@@ -389,11 +390,52 @@ class KillswitchNode:
                 logger.critical("Unhandled fault in tick: %s", exc, exc_info=True)
                 self._enter_idle(f"unhandled fault: {exc}")
 
+            self._pump_telemetry()
             self._pump_video()
 
             elapsed = time.monotonic() - tick_start
             if elapsed < period:
                 time.sleep(period - elapsed)
+
+    def _pump_telemetry(self) -> None:
+        """Publish node telemetry for the C2 dashboard. Best-effort.
+
+        `publish_telemetry` existed but was never called, so Panel C of the
+        dashboard had no data source at all. Everything here is REAL: pan/tilt
+        are the firmware's commanded angles (SG90s have no feedback — never
+        present them as measured), and `status_age_s` is the true age of the
+        last ST frame, which is the host-side view of the firmware deadman.
+        """
+        if self._c2 is None or self._telemetry_limiter.due() is False:
+            return
+
+        status = self._actuator.last_status() if self._actuator else None
+        snapshot = self._snapshots.latest()
+        hold_s = (
+            time.monotonic() - self._hold_started_at
+            if self._hold_started_at is not None else 0.0
+        )
+        detail = {
+            "pan_deg": round(status.pan, 1) if status else None,
+            "tilt_deg": round(status.tilt, 1) if status else None,
+            "effector_on": bool(status.laser_on) if status else False,
+            "armed": bool(status.armed) if status else False,
+            "uptime_ms": status.uptime_ms if status else None,
+            # Host-side deadman view: seconds since the last firmware status
+            # frame. Firmware cuts the effector at 0.25s of host silence; this
+            # is the mirror-image measurement.
+            "status_age_s": round(time.monotonic() - status.received_at, 3) if status else None,
+            "error_px": round(snapshot.error_px, 1)
+            if snapshot and snapshot.error_px != float("inf") else None,
+            "hold_s": round(hold_s, 2),
+            "hold_target_s": self._cfg["engagement"]["hold_duration_s"],
+            "target_id": self._active_target_id,
+            "track_id": self._active_track_id,
+            "compute_latency_ms": round(self._latency.compute_latency_s * 1000.0, 1),
+            "total_lead_ms": round(self._latency.total_lead_s * 1000.0, 1),
+            "mock_actuator": self._mock_actuator,
+        }
+        self._c2.publish_telemetry(self._machine.state.value, detail)
 
     def _pump_video(self) -> None:
         """Publish an annotated frame to the operator console. Best-effort."""
@@ -776,6 +818,21 @@ class KillswitchNode:
 
     def stop(self) -> None:
         self._running.clear()
+
+
+class _RateGate:
+    """Simple monotonic rate gate. Owned by the tick thread."""
+
+    def __init__(self, hz: float) -> None:
+        self._period = 1.0 / hz if hz > 0 else 0.0
+        self._last = 0.0
+
+    def due(self) -> bool:
+        now = time.monotonic()
+        if now - self._last < self._period:
+            return False
+        self._last = now
+        return True
 
 
 def load_config(path: str) -> Dict[str, Any]:

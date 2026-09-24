@@ -29,7 +29,15 @@ detector:
   # COCO classes. A quadcopter is most often called "airplane" or "kite" by
   # COCO; "bird" is the reliable stand-in for a moving aerial target. Run
   # tools.vision_probe against your actual demo target to see which fires.
-  target_classes: ["bird", "airplane", "kite"]
+  # COCO has no "drone" class. These four are the usable airborne proxies:
+  #   bird(14) airplane(4) kite(33) frisbee(29)
+  # frisbee is the best disc-shaped-airborne-object stand-in COCO offers.
+  # Filtering stays NAME-based, never index-based: the detector validates names
+  # against model.names and rejects unknowns at construction, so a re-export
+  # that reorders classes cannot silently re-target the system.
+  # Confirm what actually fires:
+  #   python -m tools.vision_probe --config config/fallback.yaml
+  target_classes: ["bird", "airplane", "kite", "frisbee"]
   device: null          # null = let ultralytics choose (cuda > mps > cpu)
 
 targeting:

@@ -4,8 +4,10 @@ Verifies the safety interlocks on real hardware before any of them matters.
 
 Usage:
     python -m tools.serial_probe --list
-    python -m tools.serial_probe --port /dev/cu.usbserial-0001
-    python -m tools.serial_probe --port <p> --interactive
+    python -m tools.serial_probe --servo-sweep         # port auto-detected
+    python -m tools.serial_probe --port COM3           # Windows
+    python -m tools.serial_probe --port /dev/cu.usbserial-130   # macOS
+    python -m tools.serial_probe --interactive
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ import logging
 import sys
 import time
 
-from helper.hardware.actuator import ActuatorError, SerialActuator
+from helper.hardware.actuator import ActuatorError, SerialActuator, resolve_port
 from helper.hardware.protocol import BAUD_RATE
 
 
@@ -265,11 +267,24 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    if args.list or not args.port:
+    if args.list:
         return list_ports()
+
+    # Auto-resolve when --port is omitted. Previously any command without
+    # --port silently fell through to list_ports(), so `--servo-sweep` alone
+    # printed a port table and moved no servos — looking exactly like a dead
+    # gimbal. Reuse the same auto-detection the node uses.
+    port = args.port
+    if not port:
+        try:
+            port = resolve_port("auto")
+        except ActuatorError as exc:
+            print(f"\n{exc}\n")
+            return list_ports()
+
     if args.servo_sweep:
-        return servo_sweep(args.port)
-    return interactive(args.port) if args.interactive else run_checks(args.port)
+        return servo_sweep(port)
+    return interactive(port) if args.interactive else run_checks(port)
 
 
 if __name__ == "__main__":

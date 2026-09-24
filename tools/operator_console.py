@@ -289,7 +289,8 @@ def main() -> int:
         console.connect()
     except (ConnectionError, OSError) as exc:
         print(f"Could not reach the broker: {exc}")
-        print("Is mosquitto running?  sudo systemctl start mosquitto")
+        from helper.comms.mqtt_client import broker_start_hint
+        print(f"Is mosquitto running?  {broker_start_hint()}")
         return 1
     return console.run()
 

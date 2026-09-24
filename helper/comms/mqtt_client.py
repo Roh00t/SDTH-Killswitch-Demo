@@ -35,6 +35,20 @@ from helper.comms.schemas import (
 
 logger = logging.getLogger(__name__)
 
+def broker_start_hint() -> str:
+    """Platform-correct command to start Mosquitto.
+
+    Telling a Windows operator to run `/opt/homebrew/...` or `systemctl` at
+    07:00 on demo day is a real cost, not a cosmetic one.
+    """
+    import sys as _sys
+    if _sys.platform.startswith("win"):
+        return r'"C:\Program Files\mosquitto\mosquitto.exe" -v   (or: net start mosquitto)'
+    if _sys.platform == "darwin":
+        return "/opt/homebrew/opt/mosquitto/sbin/mosquitto -v"
+    return "sudo systemctl start mosquitto"
+
+
 # Bounded: backpressure must surface as dropped stale cues, not memory growth.
 INBOX_MAXSIZE: int = 64
 
@@ -124,9 +138,7 @@ class C2Client:
         except (OSError, ValueError) as exc:
             raise ConnectionError(
                 f"Could not reach broker {host}:{port}: {exc}. Start it with "
-                f"'/opt/homebrew/opt/mosquitto/sbin/mosquitto -v' (macOS) or "
-                f"'sudo systemctl start mosquitto' (Linux), and leave it running "
-                f"in its own terminal."
+                f"{broker_start_hint()} and leave it running in its own terminal."
             ) from exc
 
         self._client.loop_start()
