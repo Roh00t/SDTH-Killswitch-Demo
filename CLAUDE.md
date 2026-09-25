@@ -61,39 +61,40 @@ Three independent blockers, any one of which is disqualifying:
 
 Onboard inference is not a third option: YOLO11s does not run on an S3.
 
-### HITL verification status — actuator path
+### HITL verification status — actuator path COMPLETE
 
-**Verified on the Windows rig:**
+`python -m tools.serial_probe --port COM3` — **13/13 PASS** on the Windows rig.
 
-- CH343 bridge enumerates as `COM3`; 921600 baud link stable.
-- `ActuatorStatus` frames arrive clean — no drops, no checksum failures.
-- Gimbal tracks absolute angle commands via `serial_probe --interactive` (`a <pan> <tilt>`).
-- Centre (90, 90) and tilt to 48 deg with no binding, over-travel or brownout.
+**Verified:**
 
-**NOT yet verified. The stack is not integration-ready until these pass:**
+| Area | Covered |
+|---|---|
+| Link | CH343 bridge on `COM3`, 921600 baud, `ActuatorStatus` frames clean — no drops, no checksum failures |
+| Boot state | Effector de-energised and disarmed at boot (e-stop latched) |
+| Bounds | Out-of-range commands clamped, not wrapped: pan → 180, tilt → 45 |
+| Arming interlock | Fire refused while disarmed; `M1` accepted; effector energises only once armed |
+| De-energise | Effector off on command, confirmed by status frame |
+| Burn ceiling | Firmware cut the burn at `MAX_BURN_MS` without host involvement |
+| Deadman | Heartbeat suppressed 0.6 s → firmware cut the effector **and** dropped arming |
+| Positioning | Absolute angle commands via `serial_probe --interactive` (`a <pan> <tilt>`); centre (90, 90) and tilt 48 deg with no binding or brownout |
 
-- **The travel corners.** `--servo-sweep` commands pan 5/175 and tilt 48/132, which sit
-  5 deg and 3 deg *inside* the software bounds of pan 0/180 and tilt 45/135. But
-  `SweepController.step()` and `cue_to_gimbal()` both command the true bounds, so SCAN
-  will drive the gimbal past anything that has been physically tested. The labels in
-  `servo_sweep()` read "(0 deg)" and "(45 deg)" while commanding 5 and 48 — believe the
-  numbers, not the labels.
-- **Every effector interlock**: arm/disarm, fire-while-disarmed refusal, e-stop, the
-  2000 ms burn ceiling, the 250 ms deadman. Interactive positioning exercises none of them.
-- The vision pipeline, and the C2 plane end to end on the real box.
+**One caveat to preserve, because the repo's own discipline demands it.** The two bounds
+checks read `pan`/`tilt` out of the status frame, and those are *commanded* angles — SG90s
+have no position feedback. `run_checks()` prints this itself: the gimbal section "passes
+even with no servos attached." So 13/13 proves the **firmware clamps correctly**; it does
+not, on its own, prove the servos physically reached pan 180 / tilt 45 without binding.
+That is confirmed by eye during the run, or not at all. Never quote the clamp result as
+measured travel.
 
-**One command closes the first two gaps:**
+**Remaining before the stack is integration-ready:**
 
-```bash
-python -m tools.serial_probe --port COM3
-```
+- The vision pipeline on the rig — YOLO lock against a real target through the host webcam.
+- The C2 plane end to end: bridge, dashboard, and one clean authorisation through
+  `SPACE` → `ENGAGE` → `ENGAGEMENT COMPLETE`.
 
-`run_checks()` issues `set_angles(999, -999)`, so the firmware clamps to pan 180 /
-tilt 45 — the real corners — and then runs 13 interlock checks.
-
-> **That command fires the effector.** It is now a KY-008 laser, not the LED its console
-> prints still describe: twice for ~0.5 s, then a full 2.6 s burn-ceiling test, then a
-> deadman test. Point it at a matte backstop before running it.
+> `serial_probe --port COM3` **fires the effector** — now a KY-008 laser, not the LED its
+> console prints still describe. Two ~0.5 s pulses, a 2.6 s burn-ceiling test, then a
+> deadman test. Matte backstop, area behind it clear, every time it is run.
 
 ### Pan/tilt bounds are not configurable — on purpose
 

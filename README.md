@@ -283,30 +283,30 @@ which re-enumerates on every board reset and kills the host's serial handle mid-
 
 ### Hardware verification log
 
-**Actuator path — verified on the Windows rig.** CH343 bridge on `COM3`, 921600 baud,
-`ActuatorStatus` frames clean with no drops or checksum failures. Gimbal tracks absolute
-angle commands (`python -m tools.serial_probe --port COM3 --interactive`, then
-`a <pan> <tilt>`); centre (90, 90) and tilt to 48 deg confirmed with no binding,
-over-travel or brownout.
+**Actuator path — COMPLETE.** `python -m tools.serial_probe --port COM3` passes
+**13/13** on the Windows rig: CH343 bridge at 921600 baud with clean `ActuatorStatus`
+framing, effector de-energised and disarmed at boot, out-of-range commands clamped to
+pan 180 / tilt 45, fire refused while disarmed, arming accepted, effector energised only
+once armed and de-energised on command, firmware burn ceiling cut without host
+involvement, and the 250 ms deadman cutting the effector *and* dropping arming.
+Positioning confirmed separately via `--interactive` (`a <pan> <tilt>`).
+
+> The two bounds checks read **commanded** angles from the status frame — SG90s have no
+> position feedback, and `run_checks()` notes that its gimbal section "passes even with no
+> servos attached." 13/13 proves the firmware clamps correctly. Physical travel to the
+> stops is confirmed by watching the gimbal, not by the pass count. Do not quote the clamp
+> result as measured travel.
 
 **Still outstanding before the stack is integration-ready:**
 
 | Gap | Why it matters |
 |---|---|
-| Travel corners untested | `--servo-sweep` commands pan 5/175 and tilt 48/132 — inside the real bounds of pan 0/180 and tilt 45/135. `SweepController` and `cue_to_gimbal` command the true bounds, so SCAN goes 3–5 deg past anything tested. |
-| Effector interlocks untested | Arm/disarm, fire-while-disarmed refusal, e-stop, 2000 ms burn ceiling, 250 ms deadman. Interactive positioning exercises none of them. |
-| Vision + C2 plane untested on the rig | YOLO lock, bridge, dashboard, authorisation gate. |
+| Vision pipeline untested on the rig | YOLO lock against a real target through the host webcam |
+| C2 plane untested end to end | Bridge, dashboard, and one clean `SPACE` → `ENGAGE` → `ENGAGEMENT COMPLETE` |
 
-Close the first two with one command, which drives the gimbal to the real corners via
-`set_angles(999, -999)` and then runs 13 interlock checks:
-
-```bat
-python -m tools.serial_probe --port COM3
-```
-
-> ⚠️ **This fires the effector.** It is a KY-008 laser, not the LED the console prints
-> still describe — twice for ~0.5 s, then a 2.6 s burn-ceiling test, then a deadman test.
-> Point it at a matte backstop and keep the area behind it clear before running it.
+> ⚠️ `serial_probe --port COM3` **fires the effector** — a KY-008 laser, not the LED the
+> console prints still describe. Two ~0.5 s pulses, a 2.6 s burn-ceiling test, then a
+> deadman test. Matte backstop, area behind it clear, every time.
 
 **Mosquitto runs as a service.** Confirm before launching anything:
 
