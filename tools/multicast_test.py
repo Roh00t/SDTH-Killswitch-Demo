@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 
 from helper.comms.cot import (
     COT_FRIENDLY_GROUND,
+    DEMO_SITE_LAT,
+    DEMO_SITE_LON,
     TAK_LOOPBACK_HOST,
     TAK_LOOPBACK_PORT,
     TAK_MULTICAST_GROUP,
@@ -156,7 +158,7 @@ def sender(loopback: bool, interface: str, seconds: float) -> int:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         ev = CotEvent(uid="MCAST_TEST_01", callsign="MULTICAST-TEST",
-                      cot_type=COT_FRIENDLY_GROUND, lat=1.3483, lon=103.6831,
+                      cot_type=COT_FRIENDLY_GROUND, lat=DEMO_SITE_LAT, lon=DEMO_SITE_LON,
                       hae=20.0, stale_seconds=6.0)
         try:
             sock.sendto(build_cot(ev), dest)

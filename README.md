@@ -334,6 +334,55 @@ If it reads `Stopped`, `Start-Service mosquitto`. Running as a service means you
 `-v` broker log; to watch the wire during debugging, stop the service and run
 `"C:\Program Files\mosquitto\mosquitto.exe" -v` in a terminal instead.
 
+### ATAK-CIV on a phone
+
+The bridge's CoT reaches an unmodified ATAK-CIV phone. The map is **output-only**: a
+marker dropped in ATAK does not move the gimbal, and nothing on the map is set by hand.
+
+**Install.** *ATAK-CIV (Civil Use)*, package `com.atakmap.app.civ`, free on Google Play,
+Android 5.0+. If it isn't listed in your region, get the APK from tak.gov (no login needed
+for the app itself), not from an APK mirror site.
+
+**Network.** Put the phone and laptop on the same Wi-Fi, or put the laptop on the
+phone's own hotspot, which takes the venue's access point out of the path. Many phone
+hotspots and access points drop multicast but still pass unicast, so send the phone a
+direct copy as well:
+
+```bat
+python -m tools.c2_bridge --threat-start-m 420 --cot-unicast <phone-ip>
+```
+
+On the phone's hotspot, the phone's IP is the laptop's **Default Gateway** in `ipconfig`.
+The bridge's first line then reads `CoT -> 239.2.3.1:6969 + unicast <phone-ip>:6969`.
+`--cot-unicast` repeats, so a judge's phone can be added alongside yours.
+
+**ATAK input.** *Settings → Network Preferences → Network Connection Preferences → Manage
+Inputs*: make sure a UDP input on `239.2.3.1:6969` exists and is enabled. It usually does
+by default. If unicast still shows nothing, add a UDP input on port 6969.
+
+**Before the venue:**
+- **Cache the map.** Pan and zoom around NUS Kent Ridge while you have internet, or the
+  tracks sit on a blank grid.
+- **Check the clocks.** ATAK drops a track whose stale time has already passed on the
+  phone. Threats are only valid for 4 s, so a phone clock a few seconds ahead makes them
+  vanish on arrival. If they do, add `--stale-pad-s 5` (up to 60).
+- **Keep the phone awake**, and turn off battery optimisation for ATAK. Android drops
+  multicast while the Wi-Fi radio sleeps.
+- **Smoke-test first:** `python -m tools.multicast_test --send --seconds 60` should put a
+  `MULTICAST-TEST` marker at NUS on the phone.
+
+**What the map shows.** All positions are relative to `--base` (default NUS Kent Ridge,
+`1.2966,103.7764`):
+
+| Marker | Label and remarks |
+|---|---|
+| Node 1 (real) | `KILLSWITCH-01 [<state>]`, remarks `REAL NODE \| STATE … \| TGT …`. Follows the real node: pressing SPACE in the console turns it to `[ENGAGE]`. Reads `[NO LINK]` before the node reports, as soon as its MQTT last-will fires, or after 10 s of silence. |
+| Nodes 2–20 | Remarks `SIMULATED INTERCEPTOR` / `RF-JAMMER` / `SENTRY-UGV` / `LASER` |
+| Threats | Red UAV icons, remarks `SIMULATED THREAT \| <range> m \| TTI <s> s` |
+
+The map refreshes at 2 Hz, so a state shorter than half a second (SCAN usually is) may
+not appear on it. The dashboard updates at 5 Hz.
+
 ---
 
 ## Demo Runbook — Windows, 4 terminals

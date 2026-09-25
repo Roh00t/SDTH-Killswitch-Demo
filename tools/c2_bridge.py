@@ -27,30 +27,41 @@ Usage:
     python -m tools.c2_bridge
     python -m tools.c2_bridge --loopback          # venue blocks multicast
     python -m tools.c2_bridge --no-cue            # observe only, never slew
+    python -m tools.c2_bridge --cot-unicast 192.168.43.1   # also send straight to a phone
+    python -m tools.c2_bridge --base 1.2966,103.7764        # where the fleet sits on the map
+
+The TAK map is OUTPUT-ONLY. Node 1's marker mirrors the real node's reported
+state and reads NO LINK when it stops reporting; every other marker says
+SIMULATED in its remarks. Nothing on the map is ever set by hand.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import contextlib
+import ipaddress
 import json
 import logging
 import math
 import socket
 import sys
 import time
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field, replace
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import aiomqtt
 
 from helper.comms.cot import (
     COT_FRIENDLY_GROUND,
     COT_HOSTILE_AIR_UAV,
+    DEMO_SITE_HAE,
+    DEMO_SITE_LAT,
+    DEMO_SITE_LON,
     TAK_LOOPBACK_HOST,
     TAK_LOOPBACK_PORT,
     TAK_MULTICAST_GROUP,
     TAK_MULTICAST_PORT,
+    CotError,
     CotEvent,
     bearing_range,
     build_cot,
@@ -67,9 +78,21 @@ from helper.comms.schemas import (
 
 logger = logging.getLogger("c2_bridge")
 
-# Defence node location (Singapore testbed).
-BASE_LAT, BASE_LON, BASE_HAE = 1.3483, 103.6831, 20.0
 ENGAGEMENT_PERIMETER_M = 350.0
+
+# A node that has not reported for this long reads NO LINK on every surface.
+# The map must never show a live-looking state for a node that went silent.
+NODE_LINK_TIMEOUT_S = 10.0
+# Ceiling on --stale-pad-s. Enough to absorb a TAK device whose clock runs a
+# minute ahead of this laptop; short enough that a neutralised threat cannot
+# linger on the map for minutes, which a 180 s window would do.
+MAX_STALE_PAD_S = 60.0
+# Label fields copied from node telemetry are truncated before they reach a
+# CoT event, so a malformed message can never trip outbound validation.
+MAX_LABEL_CHARS = 24
+MAX_TARGET_ID_CHARS = 64
+
+Dest = Tuple[str, int]
 
 # D2: hard ceiling on cue updates toward the ESP32.
 MAX_CUE_HZ = 5.0
@@ -97,11 +120,35 @@ class NodeState:
     status: str = "PASSIVE SCAN"
     is_real: bool = False
     last_seen: float = field(default_factory=time.monotonic)
+    target_id: Optional[str] = None
+    reported: bool = False          # real node only: telemetry seen since start
+
+    def link_state(self) -> str:
+        """The state the map may claim for the real node, or NO LINK.
+
+        NO LINK before the first report, after the node's last-will fires, and
+        once reports stop for NODE_LINK_TIMEOUT_S. A stale ENGAGE on a map is
+        worse than no state at all.
+        """
+        if not self.reported or time.monotonic() - self.last_seen > NODE_LINK_TIMEOUT_S:
+            return "NO LINK"
+        return self.status[:MAX_LABEL_CHARS]
 
     def to_cot(self) -> CotEvent:
+        """Map marker. Node 1 carries its live state; every other node says
+        SIMULATED, so nobody tapping a marker can mistake one for the other."""
+        if self.is_real:
+            state = self.link_state()
+            target = (self.target_id or "-")[:MAX_TARGET_ID_CHARS] if state != "NO LINK" else "-"
+            callsign = f"{self.callsign} [{state}]"
+            remarks = f"REAL NODE | STATE {state} | TGT {target}"
+        else:
+            callsign = self.callsign
+            remarks = f"SIMULATED {self.kind}"
         return CotEvent(
-            uid=self.node_id, callsign=self.callsign, cot_type=COT_FRIENDLY_GROUND,
+            uid=self.node_id, callsign=callsign, cot_type=COT_FRIENDLY_GROUND,
             lat=self.lat, lon=self.lon, hae=self.hae, stale_seconds=8.0,
+            remarks=remarks,
         )
 
     def to_dict(self) -> dict:
@@ -109,7 +156,7 @@ class NodeState:
             "node_id": self.node_id, "callsign": self.callsign, "kind": self.kind,
             "status": self.status, "is_real": self.is_real,
             "lat": self.lat, "lon": self.lon,
-            "stale": time.monotonic() - self.last_seen > 10.0,
+            "stale": time.monotonic() - self.last_seen > NODE_LINK_TIMEOUT_S,
         }
 
 
@@ -124,6 +171,8 @@ class ThreatTrack:
     alt_m: float
     speed_mps: float
     status: str = "INBOUND"
+    origin_lat: float = DEMO_SITE_LAT   # the base this threat is flying toward
+    origin_lon: float = DEMO_SITE_LON
 
     @property
     def time_to_impact_s(self) -> float:
@@ -133,7 +182,9 @@ class ThreatTrack:
         return max(0.0, self.distance_m / self.speed_mps)
 
     def position(self):
-        return offset_lat_lon(BASE_LAT, BASE_LON, max(0.0, self.distance_m), self.bearing_deg)
+        return offset_lat_lon(
+            self.origin_lat, self.origin_lon, max(0.0, self.distance_m), self.bearing_deg
+        )
 
     def advance(self, dt: float) -> None:
         if self.status == "INBOUND":
@@ -141,10 +192,13 @@ class ThreatTrack:
 
     def to_cot(self) -> CotEvent:
         lat, lon = self.position()
+        tti_s = self.time_to_impact_s
+        tti = f"{tti_s:.1f}" if math.isfinite(tti_s) else "-"
         return CotEvent(
             uid=self.uid, callsign=self.callsign, cot_type=COT_HOSTILE_AIR_UAV,
             lat=lat, lon=lon, hae=self.alt_m, speed=self.speed_mps,
             course=(self.bearing_deg + 180.0) % 360.0, stale_seconds=4.0,
+            remarks=f"SIMULATED THREAT | {self.distance_m:.0f} m | TTI {tti} s",
         )
 
     def to_dict(self) -> dict:
@@ -166,7 +220,17 @@ class FleetState:
     both write here concurrently.
     """
 
-    def __init__(self, simulated_nodes: int = 19) -> None:
+    def __init__(
+        self,
+        simulated_nodes: int = 19,
+        base: Tuple[float, float, float] = (DEMO_SITE_LAT, DEMO_SITE_LON, DEMO_SITE_HAE),
+    ) -> None:
+        """Args:
+            simulated_nodes: Simulated nodes beyond the real Node 1.
+            base: (lat, lon, hae) of Node 1. Everything on the map is placed
+                relative to it. Set once here and never mutated.
+        """
+        self.base_lat, self.base_lon, self.base_hae = base
         self.lock = asyncio.Lock()
         self.nodes: Dict[str, NodeState] = {}
         self.threats: Dict[str, ThreatTrack] = {}
@@ -176,11 +240,12 @@ class FleetState:
 
         self.nodes["KILLSWITCH_NODE_01"] = NodeState(
             node_id="KILLSWITCH_NODE_01", callsign="KILLSWITCH-01",
-            lat=BASE_LAT, lon=BASE_LON, hae=BASE_HAE, kind="LASER", is_real=True,
+            lat=self.base_lat, lon=self.base_lon, hae=self.base_hae, kind="LASER",
+            is_real=True,
         )
         kinds = ["INTERCEPTOR", "RF-JAMMER", "SENTRY-UGV", "LASER"]
         for i in range(2, 2 + simulated_nodes):
-            lat, lon = offset_lat_lon(BASE_LAT, BASE_LON, 400 + 90 * i, (i * 47) % 360)
+            lat, lon = offset_lat_lon(self.base_lat, self.base_lon, 400 + 90 * i, (i * 47) % 360)
             self.nodes[f"KILLSWITCH_NODE_{i:02d}"] = NodeState(
                 node_id=f"KILLSWITCH_NODE_{i:02d}", callsign=f"KILLSWITCH-{i:02d}",
                 lat=lat, lon=lon, kind=kinds[i % len(kinds)],
@@ -202,7 +267,8 @@ class FleetState:
             ("THREAT_GAMMA_01", "SWARM-GAMMA-01", 180.0, 1500.0, 40.0, 30.0),
         ):
             self.threats[uid] = ThreatTrack(
-                uid, cs, brg, start_range_m if start_range_m else dist, alt, spd
+                uid, cs, brg, start_range_m if start_range_m else dist, alt, spd,
+                origin_lat=self.base_lat, origin_lon=self.base_lon,
             )
 
     def priority_threat(self) -> Optional[ThreatTrack]:
@@ -286,8 +352,80 @@ class SlewRateLimiter:
 # ---- transport -------------------------------------------------------------
 
 
-def make_cot_socket(loopback: bool, interface_ip: Optional[str] = None):
-    """UDP socket for CoT, plus the destination tuple.
+def parse_unicast_dest(text: str) -> Dest:
+    """argparse type for --cot-unicast: ``IPv4[:PORT]``, port defaulting to 6969.
+
+    IPv4 literals only. A hostname would need DNS, which an offline venue does
+    not have, and would fail at the first send rather than at launch.
+
+    Raises:
+        argparse.ArgumentTypeError: On anything that is not a usable address.
+    """
+    host, sep, port_text = text.partition(":")
+    try:
+        ip = ipaddress.IPv4Address(host)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an IPv4 address: {exc}") from exc
+    if ip.is_multicast:
+        raise argparse.ArgumentTypeError(
+            f"{ip} is a multicast group; the multicast path is on by default")
+    port = TAK_MULTICAST_PORT
+    if sep:
+        try:
+            port = int(port_text)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"{text!r}: port is not a number") from exc
+        if not 1 <= port <= 65535:
+            raise argparse.ArgumentTypeError(f"{text!r}: port must be 1-65535")
+    return (str(ip), port)
+
+
+def parse_base(text: str) -> Tuple[float, float, float]:
+    """argparse type for --base: ``LAT,LON`` or ``LAT,LON,HAE``.
+
+    Raises:
+        argparse.ArgumentTypeError: On a malformed or out-of-range position.
+    """
+    parts = text.split(",")
+    if len(parts) not in (2, 3):
+        raise argparse.ArgumentTypeError(f"{text!r}: expected LAT,LON or LAT,LON,HAE")
+    try:
+        values = [float(v) for v in parts]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{text!r}: not a number") from exc
+    if not all(math.isfinite(v) for v in values):
+        raise argparse.ArgumentTypeError(f"{text!r}: values must be finite")
+    lat, lon = values[0], values[1]
+    hae = values[2] if len(values) == 3 else DEMO_SITE_HAE
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        raise argparse.ArgumentTypeError(f"{text!r}: latitude or longitude out of range")
+    return (lat, lon, hae)
+
+
+def parse_stale_pad(text: str) -> float:
+    """argparse type for --stale-pad-s: seconds in [0, MAX_STALE_PAD_S].
+
+    Rejected rather than clamped, so a typo is loud at launch.
+
+    Raises:
+        argparse.ArgumentTypeError: Outside the range or not a number.
+    """
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{text!r}: not a number") from exc
+    if not (math.isfinite(value) and 0.0 <= value <= MAX_STALE_PAD_S):
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: must be between 0 and {MAX_STALE_PAD_S:.0f} seconds")
+    return value
+
+
+def make_cot_socket(
+    loopback: bool,
+    interface_ip: Optional[str] = None,
+    unicast: Sequence[Dest] = (),
+) -> Tuple[socket.socket, List[Dest]]:
+    """UDP socket for CoT, plus every destination to send each datagram to.
 
     Args:
         loopback: Use 127.0.0.1 unicast instead of multicast. Venue networks
@@ -295,17 +433,39 @@ def make_cot_socket(loopback: bool, interface_ip: Optional[str] = None):
         interface_ip: Bind IP_MULTICAST_IF explicitly. Needed when the laptop
             has several adapters (wifi + hotspot + virtual) and the kernel
             picks the wrong one.
+        unicast: Extra destinations that get a direct copy of every datagram.
+            Phone hotspots and many access points drop multicast but still
+            pass unicast, so this is what gets tracks onto an ATAK-CIV phone.
+
+    Returns:
+        ``(sock, dests)``: the multicast or loopback destination first, then
+        the unicast destinations in the order given.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     if loopback:
-        return sock, (TAK_LOOPBACK_HOST, TAK_LOOPBACK_PORT)
+        return sock, [(TAK_LOOPBACK_HOST, TAK_LOOPBACK_PORT), *unicast]
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
     if interface_ip:
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
                         socket.inet_aton(interface_ip))
         logger.info("Bound IP_MULTICAST_IF to %s", interface_ip)
-    return sock, (TAK_MULTICAST_GROUP, TAK_MULTICAST_PORT)
+    return sock, [(TAK_MULTICAST_GROUP, TAK_MULTICAST_PORT), *unicast]
+
+
+def prepare_datagram(event: CotEvent, stale_pad_s: float = 0.0) -> bytes:
+    """Serialise one event, extending its stale window by the clock-drift pad.
+
+    The pad is clamped to [0, MAX_STALE_PAD_S] here as well as at argparse,
+    so no caller can push a neutralised threat's lifetime into minutes.
+
+    Raises:
+        CotError: If the event fails outbound validation.
+    """
+    pad = min(max(stale_pad_s, 0.0), MAX_STALE_PAD_S)
+    if pad:
+        event = replace(event, stale_seconds=event.stale_seconds + pad)
+    return build_cot(event)
 
 
 # ---- tasks -----------------------------------------------------------------
@@ -334,18 +494,41 @@ async def task_swarm(fleet: FleetState) -> None:
         await asyncio.sleep(dt)
 
 
-async def task_cot_broadcast(fleet: FleetState, sock, dest) -> None:
-    """Push the whole picture to WinTAK."""
+async def task_cot_broadcast(
+    fleet: FleetState, sock: socket.socket, dests: Sequence[Dest], stale_pad_s: float = 0.0,
+) -> None:
+    """Push the whole picture to every TAK destination."""
+    failing: Set[Dest] = set()
+    rejected: Set[str] = set()
     while True:
         async with fleet.lock:
             events = [n.to_cot() for n in fleet.nodes.values()]
             events += [t.to_cot() for t in fleet.threats.values() if t.status == "INBOUND"]
         for ev in events:
             try:
-                sock.sendto(build_cot(ev), dest)
-            except OSError as exc:
-                # DDIL: a jammed or flapping interface must not kill the bridge.
-                logger.debug("CoT send failed for %s: %s", ev.uid, exc)
+                payload = prepare_datagram(ev, stale_pad_s)
+            except CotError as exc:
+                # One bad event must not take the TaskGroup, and with it the
+                # whole bridge, down. Warn once per track, then skip it.
+                if ev.uid not in rejected:
+                    rejected.add(ev.uid)
+                    logger.warning("CoT for %s failed validation, skipped: %s", ev.uid, exc)
+                continue
+            for dest in dests:
+                try:
+                    sock.sendto(payload, dest)
+                    failing.discard(dest)
+                except OSError as exc:
+                    # DDIL: a jammed or flapping interface must not kill the
+                    # bridge. The first failure per destination is a WARNING:
+                    # at debug, a phone that never receives anything is silent.
+                    if dest not in failing:
+                        failing.add(dest)
+                        logger.warning("CoT to %s:%d failing: %s (repeats logged at debug)",
+                                       dest[0], dest[1], exc)
+                    else:
+                        logger.debug("CoT to %s:%d failed for %s: %s",
+                                     dest[0], dest[1], ev.uid, exc)
         await asyncio.sleep(1.0 / COT_BROADCAST_HZ)
 
 
@@ -363,7 +546,17 @@ async def task_mqtt_consume(fleet: FleetState, client: aiomqtt.Client) -> None:
             async with fleet.lock:
                 node = fleet.nodes.get("KILLSWITCH_NODE_01")
                 if node is not None:
-                    node.last_seen = time.monotonic()
+                    if body.get("event") == "node_lost":
+                        # The broker publishes the node's last will when it dies.
+                        # Treat it as the end of the link at once rather than as
+                        # a sign of life, or the map would keep showing the dead
+                        # node's final state for another NODE_LINK_TIMEOUT_S.
+                        node.reported = False
+                    else:
+                        node.last_seen = time.monotonic()
+                        node.reported = True
+                        if "state" in body and "target_id" in body:
+                            node.target_id = body["target_id"]
                 state = body.get("state") or body.get("to")
                 if state:
                     fleet.node1_state = state
@@ -395,8 +588,8 @@ async def task_cue(fleet: FleetState, client: aiomqtt.Client, enabled: bool) -> 
             lat, lon = threat.position()
             uid, alt = threat.uid, threat.alt_m
 
-        az, rng = bearing_range(BASE_LAT, BASE_LON, lat, lon)
-        el = elevation_angle(rng, alt, BASE_HAE)
+        az, rng = bearing_range(fleet.base_lat, fleet.base_lon, lat, lon)
+        el = elevation_angle(rng, alt, fleet.base_hae)
         if uid != current_uid:
             limiter.reset()
             current_uid = uid
@@ -458,7 +651,8 @@ async def task_websocket(fleet: FleetState, host: str, port: int) -> None:
             enc = encoders["KILLSWITCH_NODE_01"]
             payload["mavlink"] = [
                 enc.heartbeat(armed=fleet.node1_state in ("ENGAGE", "OPERATOR_AUTH")).to_dict(),
-                enc.global_position_int(BASE_LAT, BASE_LON, BASE_HAE).to_dict(),
+                enc.global_position_int(fleet.base_lat, fleet.base_lon,
+                                        fleet.base_hae).to_dict(),
             ]
             blob = json.dumps(payload)
             await asyncio.gather(*(c.send(blob) for c in list(clients)),
@@ -473,11 +667,15 @@ async def task_websocket(fleet: FleetState, host: str, port: int) -> None:
 
 
 async def run(args) -> int:
-    fleet = FleetState(simulated_nodes=args.sim_nodes)
+    fleet = FleetState(simulated_nodes=args.sim_nodes, base=args.base)
     fleet.seed_swarm(start_range_m=args.threat_start_m)
-    sock, dest = make_cot_socket(args.loopback, args.multicast_if)
-    logger.info("CoT -> %s:%d  |  %d nodes (1 real)  |  cue=%s",
-                dest[0], dest[1], len(fleet.nodes), "ON" if not args.no_cue else "OFF")
+    sock, dests = make_cot_socket(args.loopback, args.multicast_if, args.cot_unicast or ())
+    unicast_note = "".join(f" + unicast {h}:{p}" for h, p in dests[1:])
+    logger.info("CoT -> %s:%d%s  |  %d nodes (1 real)  |  cue=%s",
+                dests[0][0], dests[0][1], unicast_note, len(fleet.nodes),
+                "ON" if not args.no_cue else "OFF")
+    logger.info("Map base %.4f, %.4f  |  stale pad %.0f s",
+                fleet.base_lat, fleet.base_lon, args.stale_pad_s)
 
     # `return` is illegal inside an `except*` block, so the exit code is carried
     # in a local and returned after the handlers.
@@ -487,7 +685,7 @@ async def run(args) -> int:
             logger.info("MQTT connected to %s:%d", args.broker, args.port)
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(task_swarm(fleet))
-                tg.create_task(task_cot_broadcast(fleet, sock, dest))
+                tg.create_task(task_cot_broadcast(fleet, sock, dests, args.stale_pad_s))
                 tg.create_task(task_mqtt_consume(fleet, client))
                 tg.create_task(task_cue(fleet, client, not args.no_cue))
                 tg.create_task(task_websocket(fleet, args.ws_host, args.ws_port))
@@ -546,6 +744,18 @@ def main() -> int:
     p.add_argument("--threat-start-m", type=float, default=None,
                    help="Start all threats at this range. Use ~420 on stage so the "
                         "perimeter breach happens in seconds, not half a minute.")
+    p.add_argument("--cot-unicast", action="append", type=parse_unicast_dest,
+                   metavar="IP[:PORT]",
+                   help="Also send every CoT datagram straight to this device. "
+                        "Repeatable; port defaults to 6969. Use the ATAK phone's IP "
+                        "when the network drops multicast")
+    p.add_argument("--base", type=parse_base,
+                   default=(DEMO_SITE_LAT, DEMO_SITE_LON, DEMO_SITE_HAE),
+                   metavar="LAT,LON[,HAE]",
+                   help="Where the fleet sits on the map. Default: NUS Kent Ridge")
+    p.add_argument("--stale-pad-s", type=parse_stale_pad, default=0.0, metavar="SECONDS",
+                   help=f"Add to every track's stale time (0-{MAX_STALE_PAD_S:.0f}). Use "
+                        "when the TAK device's clock runs ahead and tracks vanish on arrival")
     p.add_argument("--no-cue", action="store_true",
                    help="Do not publish slew_to_cue — observe only, servos stay put")
     args = p.parse_args()

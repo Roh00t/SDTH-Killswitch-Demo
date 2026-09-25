@@ -105,6 +105,18 @@ it is handed one. The reason is the release chain: a synthetic target satisfies 
 lock" with nothing real in the beam path. Keep that invariant if you extend the sim.
 MQTT stays real so the bridge, console and dashboard run against it unchanged.
 
+### The TAK map is output-only and never invents state
+
+The bridge sends CoT; nothing listens for it. `parse_cot` is hardened but unwired, so a
+marker dropped in ATAK does not cue the gimbal. Wiring it would make the LAN an
+unauthenticated cue source for an effector-carrying gimbal, which is safety-critical work.
+
+Node 1's marker mirrors the real node's reported state (`KILLSWITCH-01 [ENGAGE]`) and
+reads `NO LINK` before the first report, on the MQTT last-will, or after
+`NODE_LINK_TIMEOUT_S` of silence. Every other marker says `SIMULATED` in its remarks.
+Never add a path that sets engagement state on the map by hand; a status a keypress can
+fake is a status a judge cannot trust.
+
 ### Pan/tilt bounds are not configurable — on purpose
 
 No YAML file defines them, and none should. The limits live in
@@ -152,7 +164,7 @@ python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 199 tests, zero hardware
+pytest tests/ -q                                    # 226 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -254,7 +266,7 @@ a human reads.
 
 ## Testing
 
-199 tests, all hardware-free, ~1 s.
+226 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
@@ -263,6 +275,7 @@ a human reads.
 | `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop |
 | `test_state_machine.py` | Transition table, sweep bounds, cue geometry, prediction |
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
+| `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will |
 | `test_sim_scene.py` | `--sim-target` scene: refuses a real actuator, closes the loop, fresh ids on reset |
 
 **Unit tests are necessary but not sufficient.** Five real bugs were found only by running

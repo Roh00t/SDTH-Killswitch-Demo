@@ -228,3 +228,215 @@ class TestThreatPriority:
         real = [n for n in fleet.nodes.values() if n.is_real]
         assert len(real) == 1 and real[0].node_id == "KILLSWITCH_NODE_01"
         assert len(fleet.nodes) == 20
+
+
+# ---- ATAK hardening: remarks, unicast, stale pad, base, honest labels --------
+
+
+def _window_s(payload: bytes) -> float:
+    """Seconds between a CoT event's time and stale stamps."""
+    import xml.etree.ElementTree as ET
+    from datetime import datetime
+
+    root = ET.fromstring(payload)
+    fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+    return (datetime.strptime(root.get("stale"), fmt)
+            - datetime.strptime(root.get("time"), fmt)).total_seconds()
+
+
+class TestRemarks:
+    def test_remarks_round_trip(self):
+        parsed = parse_cot(build_cot(hostile(remarks="SIMULATED THREAT | 312 m")))
+        assert parsed.remarks == "SIMULATED THREAT | 312 m"
+
+    def test_remarks_are_escaped(self):
+        raw = build_cot(hostile(remarks='<script>&"'))
+        assert b"<script>" not in raw
+        assert parse_cot(raw).remarks == '<script>&"'
+
+    def test_oversize_remarks_rejected_outbound(self):
+        from helper.comms.cot import MAX_REMARKS_CHARS
+
+        with pytest.raises(CotError, match="remarks"):
+            build_cot(hostile(remarks="x" * (MAX_REMARKS_CHARS + 1)))
+
+    def test_payload_without_remarks_still_parses(self):
+        xml = (b'<?xml version="1.0"?><event uid="A1" type="a-h-A">'
+               b'<point lat="1.3" lon="103.7"/></event>')
+        assert parse_cot(xml).remarks == ""
+
+
+class TestUnicastAndStalePad:
+    def test_unicast_dest_defaults_to_the_tak_port(self):
+        from tools.c2_bridge import parse_unicast_dest
+
+        assert parse_unicast_dest("10.0.0.5") == ("10.0.0.5", 6969)
+        assert parse_unicast_dest("10.0.0.5:4242") == ("10.0.0.5", 4242)
+
+    @pytest.mark.parametrize("bad", [
+        "999.1.1.1", "10.0.0.5:0", "10.0.0.5:70000", "10.0.0.5:abc",
+        "phone.local", "239.2.3.1",
+    ])
+    def test_unicast_dest_rejects_unusable_values(self, bad):
+        import argparse
+
+        from tools.c2_bridge import parse_unicast_dest
+
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_unicast_dest(bad)
+
+    def test_multicast_goes_first_then_each_unicast(self):
+        from tools.c2_bridge import make_cot_socket
+
+        sock, dests = make_cot_socket(False, None, [("10.0.0.5", 6969), ("10.0.0.6", 4242)])
+        sock.close()
+        assert dests == [("239.2.3.1", 6969), ("10.0.0.5", 6969), ("10.0.0.6", 4242)]
+        sock, dests = make_cot_socket(True, None, [("10.0.0.5", 6969)])
+        sock.close()
+        assert dests == [("127.0.0.1", 18999), ("10.0.0.5", 6969)]
+
+    def test_stale_pad_extends_the_window(self):
+        from tools.c2_bridge import prepare_datagram
+
+        ev = hostile(stale_seconds=4.0)
+        assert _window_s(prepare_datagram(ev)) == pytest.approx(4.0, abs=0.01)
+        assert _window_s(prepare_datagram(ev, 5.0)) == pytest.approx(9.0, abs=0.01)
+
+    def test_stale_pad_is_capped_so_dead_tracks_cannot_linger(self):
+        from tools.c2_bridge import MAX_STALE_PAD_S, prepare_datagram
+
+        window = _window_s(prepare_datagram(hostile(stale_seconds=4.0), 500.0))
+        assert window == pytest.approx(4.0 + MAX_STALE_PAD_S, abs=0.01)
+
+    @pytest.mark.parametrize("bad", ["-1", "61", "nan", "soon"])
+    def test_stale_pad_arg_rejects_out_of_range(self, bad):
+        import argparse
+
+        from tools.c2_bridge import parse_stale_pad
+
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_stale_pad(bad)
+
+
+class TestMapBase:
+    def test_default_base_is_the_demo_site(self):
+        from helper.comms.cot import DEMO_SITE_LAT, DEMO_SITE_LON
+        from tools.c2_bridge import FleetState
+
+        n1 = FleetState(simulated_nodes=0).nodes["KILLSWITCH_NODE_01"]
+        assert (n1.lat, n1.lon) == (DEMO_SITE_LAT, DEMO_SITE_LON)
+
+    def test_base_moves_the_fleet_and_keeps_threat_bearings(self):
+        from tools.c2_bridge import FleetState
+
+        fleet = FleetState(simulated_nodes=0, base=(10.0, 20.0, 5.0))
+        fleet.seed_swarm()
+        n1 = fleet.nodes["KILLSWITCH_NODE_01"]
+        assert (n1.lat, n1.lon, n1.hae) == (10.0, 20.0, 5.0)
+        for t in fleet.threats.values():
+            brg, _ = bearing_range(10.0, 20.0, *t.position())
+            assert abs(((brg - t.bearing_deg + 180) % 360) - 180) < 0.5
+
+    def test_base_arg_parsing(self):
+        import argparse
+
+        from tools.c2_bridge import parse_base
+
+        assert parse_base("1.2966,103.7764") == (1.2966, 103.7764, 20.0)
+        assert parse_base("1.2966,103.7764,35") == (1.2966, 103.7764, 35.0)
+        for bad in ("91,0", "1,2,3,4", "a,b", "nan,1", "1"):
+            with pytest.raises(argparse.ArgumentTypeError):
+                parse_base(bad)
+
+
+class TestHonestLabels:
+    def _node1(self):
+        from tools.c2_bridge import FleetState
+
+        return FleetState(simulated_nodes=3).nodes["KILLSWITCH_NODE_01"]
+
+    def test_real_node_reads_no_link_before_any_telemetry(self):
+        ev = self._node1().to_cot()
+        assert ev.callsign == "KILLSWITCH-01 [NO LINK]"
+        assert ev.remarks == "REAL NODE | STATE NO LINK | TGT -"
+
+    def test_real_node_mirrors_its_reported_state_and_target(self):
+        import time
+
+        n1 = self._node1()
+        n1.reported, n1.last_seen = True, time.monotonic()
+        n1.status, n1.target_id = "ENGAGE", "TRK-BETA_01"
+        ev = n1.to_cot()
+        assert ev.callsign == "KILLSWITCH-01 [ENGAGE]"
+        assert ev.remarks == "REAL NODE | STATE ENGAGE | TGT TRK-BETA_01"
+
+    def test_real_node_reads_no_link_once_silent(self):
+        import time
+
+        from tools.c2_bridge import NODE_LINK_TIMEOUT_S
+
+        n1 = self._node1()
+        n1.reported, n1.status, n1.target_id = True, "ENGAGE", "TRK-BETA_01"
+        n1.last_seen = time.monotonic() - NODE_LINK_TIMEOUT_S - 1.0
+        ev = n1.to_cot()
+        assert ev.callsign == "KILLSWITCH-01 [NO LINK]"
+        assert "TGT -" in ev.remarks, "a silent node must not advertise a live target"
+
+    def test_oversized_telemetry_cannot_break_outbound_validation(self):
+        import time
+
+        n1 = self._node1()
+        n1.reported, n1.last_seen = True, time.monotonic()
+        n1.status, n1.target_id = "S" * 500, "T" * 500
+        build_cot(n1.to_cot())  # must not raise
+
+    def test_everything_else_says_simulated(self):
+        from tools.c2_bridge import FleetState
+
+        fleet = FleetState(simulated_nodes=3)
+        fleet.seed_swarm()
+        for node in fleet.nodes.values():
+            if not node.is_real:
+                assert node.to_cot().remarks == f"SIMULATED {node.kind}"
+        for threat in fleet.threats.values():
+            assert threat.to_cot().remarks.startswith("SIMULATED THREAT | ")
+
+    def test_last_will_drops_the_map_to_no_link_at_once(self):
+        """The node's MQTT last-will must end the link, not refresh it."""
+        import asyncio
+        import json
+
+        from tools.c2_bridge import FleetState, task_mqtt_consume
+
+        class Msg:
+            def __init__(self, body):
+                self.payload = json.dumps(body).encode()
+
+        class FakeClient:
+            def __init__(self, bodies):
+                self._msgs = [Msg(b) for b in bodies]
+
+            async def subscribe(self, topic):
+                return None
+
+            def messages(self):
+                msgs = self._msgs
+
+                class Ctx:
+                    async def __aenter__(self):
+                        async def gen():
+                            for m in msgs:
+                                yield m
+                        return gen()
+
+                    async def __aexit__(self, *exc):
+                        return False
+                return Ctx()
+
+        fleet = FleetState(simulated_nodes=0)
+        live = {"state": "ENGAGE", "target_id": "TRK-BETA_01", "pan_deg": 45.0}
+        asyncio.run(task_mqtt_consume(fleet, FakeClient([live])))
+        assert fleet.nodes["KILLSWITCH_NODE_01"].to_cot().callsign == "KILLSWITCH-01 [ENGAGE]"
+
+        asyncio.run(task_mqtt_consume(fleet, FakeClient([{"event": "node_lost"}])))
+        assert fleet.nodes["KILLSWITCH_NODE_01"].to_cot().callsign == "KILLSWITCH-01 [NO LINK]"

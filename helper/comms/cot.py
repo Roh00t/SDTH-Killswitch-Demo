@@ -2,20 +2,21 @@
 
 CoT is the wire format TAK products speak. Emitting it is what makes the claim
 "interoperable with existing military C2" demonstrable rather than aspirational:
-a judge can open WinTAK on their own laptop and watch our tracks populate.
+a judge can open WinTAK or ATAK-CIV on their own device and watch our tracks
+populate.
 
-This module is BIDIRECTIONAL and that is the point:
+    outbound  FleetState -> CoT XML -> UDP multicast/unicast -> TAK map   (LIVE)
+    inbound   CoT XML    -> parse_cot -> validated CotEvent               (PARSER ONLY)
 
-    outbound  FleetState -> CoT XML -> UDP multicast -> WinTAK map
-    inbound   CoT XML    -> bearing/range -> c2/radar/slew_to_cue -> REAL GIMBAL
+The map is OUTPUT-ONLY today. `parse_cot` is complete and hardened, but nothing
+listens for inbound CoT: a marker dropped in ATAK does not move the gimbal. Do
+not describe it as if it does. Wiring it to `slew_to_cue` would make the LAN an
+unauthenticated cue source for a gimbal that carries an effector, which is a
+safety-critical change, not a demo tweak.
 
-The inbound path is what turns a map icon into physical motion. It reuses the
-already-validated `slew_to_cue` schema and `cue_to_gimbal()`, so a threat track
-moving on the map drives the servos through machinery that is already tested.
-
-Threat model: inbound CoT arrives over UDP multicast from anything on the LAN.
-Treat every payload as hostile until parsed and range-checked, exactly as
-`helper/comms/schemas.py` does for MQTT (guardrails.md section 3).
+Threat model for when it is wired: inbound CoT arrives over UDP from anything on
+the LAN. Treat every payload as hostile until parsed and range-checked, exactly
+as `helper/comms/schemas.py` does for MQTT (guardrails.md section 3).
 """
 from __future__ import annotations
 
@@ -36,6 +37,14 @@ TAK_MULTICAST_PORT: int = 6969
 # Loopback fallback for venues that block multicast. Test BOTH before demo day.
 TAK_LOOPBACK_HOST: str = "127.0.0.1"
 TAK_LOOPBACK_PORT: int = 18999
+
+# Demo site: NUS Kent Ridge, where the judges are standing. The single source of
+# truth for where the bridge places its fleet and where multicast_test drops its
+# marker. Kept here rather than in the bridge so multicast_test stays free of the
+# bridge's dependencies. Override per venue with `c2_bridge --base`.
+DEMO_SITE_LAT: float = 1.2966
+DEMO_SITE_LON: float = 103.7764
+DEMO_SITE_HAE: float = 20.0
 
 # ---- MIL-STD-2525 / CoT type atoms -----------------------------------------
 # CoT type grammar: a-<affiliation>-<battle dimension>-...
@@ -60,6 +69,10 @@ EARTH_RADIUS_M: float = 6371000.0
 # Inbound hardening. A CoT event is a few hundred bytes; anything larger is
 # either malformed or an attempt to exhaust the parser.
 MAX_COT_BYTES: int = 8192
+# Remarks are shown when an operator taps a marker. Bounded so a runaway string
+# can neither blow the datagram budget nor flood a TAK detail pane.
+MAX_REMARKS_CHARS: int = 200
+DEFAULT_REMARKS: str = "KILLSWITCH SDDE"
 UID_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 
 
@@ -84,6 +97,8 @@ class CotEvent:
         stale_seconds: How long the track remains valid on the map. Tracks that
             stop refreshing drop off automatically, which is the behaviour we
             want for a neutralised threat.
+        remarks: Free text shown when an operator taps the marker. The bridge
+            uses it to say plainly whether a track is real or simulated.
     """
 
     uid: str
@@ -95,6 +110,7 @@ class CotEvent:
     speed: float = 0.0
     course: float = 0.0
     stale_seconds: float = 5.0
+    remarks: str = DEFAULT_REMARKS
 
     @property
     def affiliation(self) -> str:
@@ -134,6 +150,8 @@ def build_cot(event: CotEvent, now: Optional[datetime] = None) -> bytes:
     _validate_latlon(event.lat, event.lon)
     if not event.cot_type or not event.cot_type.startswith("a-"):
         raise CotError(f"cot_type {event.cot_type!r} is not a CoT atom")
+    if len(event.remarks) > MAX_REMARKS_CHARS:
+        raise CotError(f"remarks {len(event.remarks)} chars exceeds {MAX_REMARKS_CHARS}")
 
     stamp = now or datetime.now(timezone.utc)
     time_s = _iso(stamp)
@@ -151,7 +169,7 @@ def build_cot(event: CotEvent, now: Optional[datetime] = None) -> bytes:
         f"<detail>"
         f'<contact callsign="{_esc(event.callsign)}"/>'
         f'<track speed="{event.speed:.2f}" course="{event.course:.2f}"/>'
-        f'<remarks>KILLSWITCH SDDE</remarks>'
+        f"<remarks>{_esc(event.remarks)}</remarks>"
         f"</detail>"
         f"</event>"
     ).encode("utf-8")
@@ -206,7 +224,9 @@ def parse_cot(payload: bytes) -> CotEvent:
     detail = root.find("detail")
     callsign = uid
     speed = course = 0.0
+    remarks = ""
     if detail is not None:
+        remarks = (detail.findtext("remarks") or "")[:MAX_REMARKS_CHARS]
         contact = detail.find("contact")
         if contact is not None:
             callsign = contact.get("callsign", uid)[:64]
@@ -224,6 +244,7 @@ def parse_cot(payload: bytes) -> CotEvent:
         hae=_float_attr(point, "hae", default=0.0),
         speed=speed,
         course=course,
+        remarks=remarks,
     )
 
 
