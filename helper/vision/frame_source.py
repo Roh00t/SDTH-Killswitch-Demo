@@ -242,8 +242,9 @@ class MockFrameSource(FrameSource):
     """Synthetic frames for hardware-free testing.
 
     The second implementation of FrameSource, and the one the test suite runs
-    against. Emits a configurable blob on a dark field so a detector or a
-    contrived stub has something to find.
+    against. Emits all-black frames at a throttled rate: there is nothing in
+    the pixels to find. For a target, pair it with a scripted detector, or with
+    tools/simulator.py::SceneDetector for a closed loop (`main.py --sim-target`).
     """
 
     def __init__(self, width: int = 640, height: int = 480, fps: float = 60.0) -> None:

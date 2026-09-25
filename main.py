@@ -71,6 +71,7 @@ class KillswitchNode:
         mock_c2: bool = False,
         mock_camera: bool = False,
         mock_detector: bool = False,
+        sim_target: bool = False,
     ) -> None:
         """Args:
             config: Parsed bench.yaml.
@@ -79,6 +80,11 @@ class KillswitchNode:
             mock_c2: Mock only the C2 plane (no MQTT broker running).
             mock_camera: Mock only the camera.
             mock_detector: Mock only the detector (no weights needed).
+            sim_target: Replace the camera and detector with a closed-loop
+                synthetic target (tools/simulator.py::SceneDetector). FORCES the
+                mock actuator: a simulated target must never steer a real
+                effector. C2 stays real unless mock_c2 is also set, so the
+                bridge, console and dashboard all work against a simulated node.
 
         The granular flags exist because the subsystems fail independently in
         practice: a dev machine commonly has a working camera and model but no
@@ -86,10 +92,11 @@ class KillswitchNode:
         """
         self._cfg = config
         self._mock = mock
-        self._mock_actuator = mock or mock_actuator
+        self._sim_target = sim_target
+        self._mock_actuator = mock or mock_actuator or sim_target
         self._mock_c2 = mock or mock_c2
-        self._mock_camera = mock or mock_camera
-        self._mock_detector = mock or mock_detector
+        self._mock_camera = mock or mock_camera or sim_target
+        self._mock_detector = mock or mock_detector or sim_target
 
         # Dependencies are declared here and CONSTRUCTED in start(). Nothing is
         # implicitly available; nothing starts before it is injected.
@@ -164,8 +171,8 @@ class KillswitchNode:
         logger.info(
             "Starting node — actuator=%s camera=%s detector=%s c2=%s",
             "MOCK" if self._mock_actuator else "real",
-            "MOCK" if self._mock_camera else "real",
-            "MOCK" if self._mock_detector else "real",
+            "SIM" if self._sim_target else ("MOCK" if self._mock_camera else "real"),
+            "SIM" if self._sim_target else ("MOCK" if self._mock_detector else "real"),
             "MOCK" if self._mock_c2 else "real",
         )
         try:
@@ -203,6 +210,7 @@ class KillswitchNode:
             "mock_camera": self._mock_camera,
             "mock_detector": self._mock_detector,
             "mock_c2": self._mock_c2,
+            "sim_target": self._sim_target,
             "frame_size": list(self._camera.frame_size),
             "deg_per_px": round(self._gains.deg_per_px, 5),
         })
@@ -232,7 +240,11 @@ class KillswitchNode:
 
     def _build_camera(self) -> None:
         cam = self._cfg["camera"]
-        if self._mock_camera:
+        if self._sim_target:
+            # Imported here, not at module top: production never loads tools/.
+            from tools.simulator import SIM_FRAME_FPS
+            self._camera = MockFrameSource(cam["width"], cam["height"], fps=SIM_FRAME_FPS)
+        elif self._mock_camera:
             self._camera = MockFrameSource(cam["width"], cam["height"])
         else:
             self._camera = UsbCameraSource(
@@ -246,6 +258,19 @@ class KillswitchNode:
 
     def _build_detector(self) -> None:
         det = self._cfg["detector"]
+        if self._sim_target:
+            from tools.simulator import SceneDetector
+            cam = self._cfg["camera"]
+            # The actuator is built first (start() step 1), so it exists here.
+            # SceneDetector refuses anything but MockActuator.
+            self._detector = SceneDetector(
+                self._actuator,
+                class_name=det["target_classes"][0],
+                frame_width=cam["width"],
+                frame_height=cam["height"],
+                horizontal_fov_deg=cam["horizontal_fov_deg"],
+            )
+            return
         if self._mock_detector:
             self._detector = ScriptedDetector([])
             return
@@ -860,6 +885,10 @@ def main() -> int:
                         help="Synthetic frames instead of a camera")
     parser.add_argument("--mock-detector", action="store_true",
                         help="No model weights needed")
+    parser.add_argument("--sim-target", action="store_true",
+                        help="Hardware-free demo: closed-loop synthetic target, no "
+                             "camera. Forces --mock-actuator. MQTT stays real, so "
+                             "the bridge, console and dashboard all connect")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -876,6 +905,7 @@ def main() -> int:
         mock_c2=args.mock_c2,
         mock_camera=args.mock_camera,
         mock_detector=args.mock_detector,
+        sim_target=args.sim_target,
     )
 
     def handle_signal(signum, _frame):

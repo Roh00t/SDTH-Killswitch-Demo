@@ -382,7 +382,8 @@ run that is a wiring or port fault, not a display quirk.
    (`config/fallback.yaml`). Watch `SCAN → TRACK`.
 4. Hold it steady. The **HOLD PROGRESS** bar fills over 3.0 s, then the state pill turns
    amber and blinks: **`OPERATOR_AUTH`**. You have 10 s.
-5. **Focus Terminal C and press `SPACE`.** C logs `AUTHORISED TRK-…`; B logs
+5. **Focus Terminal C and press `SPACE` at t ≈ 10.0–10.5 s** (see below for why the
+   timing matters). C logs `AUTHORISED TRK-…`; B logs
    `operator AUTHORISED …` and `OPERATOR_AUTH → ENGAGE`; the dashboard `ARMED / EFFECTOR`
    cell reads **`FIRING`**. The laser burns for 1.8 s, then `ENGAGEMENT COMPLETE`.
 6. **The fail-safe demo:** during a burn, pull the USB cable. The laser dies within
@@ -392,10 +393,57 @@ run that is a wiring or port fault, not a display quirk.
 resolve by **t ≈ 13.7 s**, after which the scenario resets to ~1210 m and the next breach
 is ~20 s out. Restart Terminal D immediately before you present.
 
-**At t ≈ 11.71 s, GAMMA-01 (bearing 180°) becomes the priority threat and every cue for
-it is rejected** — it sits outside the 180° pan arc, so `cue_to_gimbal()` returns `None`
-and the node publishes `cue_rejected` without moving. Azimuth is rejected; elevation is
-clamped. That asymmetry is deliberate and is worth narrating rather than hiding.
+**GAMMA-01 (bearing 180°) takes priority at t ≈ 11.9 s** — 11.71 s on paper, later in
+practice because the bridge ticks at 10 Hz. It sits outside the 180° pan arc, so
+`cue_to_gimbal()` returns `None` and the node publishes `cue_rejected` without moving.
+Azimuth is rejected; elevation is clamped. That asymmetry is deliberate and is worth
+narrating rather than hiding.
+
+**The rejection only shows if the node is in IDLE at that moment.** The node reads cues
+only in IDLE and OPERATOR_AUTH, and only IDLE rejects them out loud; SCAN, TRACK, HOLD and
+ENGAGE ignore cues entirely. So time `SPACE` so the 1.8 s burn ends inside GAMMA's window.
+Measured on the full stack (`--sim-target`, `fallback.yaml`), one run per press time:
+
+| `SPACE` at | GAMMA rejections logged | Time to narrate |
+|---|---|---|
+| 9.9 s | 9 | ~1.8 s |
+| **10.5 s** | **7** | **~1.4 s** |
+| 11.5 s | 2 | ~0.4 s |
+
+Aim for 10.0–10.5 s. Missed it? Press `D` while the pill reads `OPERATOR_AUTH` between
+11.9 and 13.7 s; the node drops to IDLE and the rejections follow. Press `D` only in
+OPERATOR_AUTH — from any other state it queues.
+
+### Hardware-free fallback: `--sim-target`
+
+If the ESP32, the camera, or the vision lock fails on the day, the whole trigger chain
+still runs with no hardware at all. Relaunch **only Terminal B**:
+
+```bat
+python main.py --config config/fallback.yaml --sim-target
+```
+
+Terminals A, C and D stay exactly as they are. What changes:
+
+- The camera and detector are replaced by `tools/simulator.py::SceneDetector`, a
+  synthetic target placed where BETA-01's cue points the gimbal (pan 45°). It uses the
+  same closed-loop scene model as the convergence proof: its pixel position depends on
+  where the gimbal points, so the node's real control law has to earn the lock.
+- **The mock actuator is forced, and nothing can override it.** A synthetic target
+  satisfies the visual-lock condition with nothing real in the beam path; driving the real
+  laser from it would fire at whatever the gimbal faces. `SceneDetector` raises
+  `TypeError` if handed anything but `MockActuator`.
+- MQTT stays real, so the bridge, console and dashboard connect as normal. The dashboard
+  badge reads cyan **`LOOPBACK SIM`**. Say so out loud; a judge who spots it unprompted
+  will assume you hid it.
+- B's first line reads `actuator=MOCK camera=SIM detector=SIM c2=real`.
+
+Verified end to end on a broker + engine + bridge run: `SCAN → TRACK → HOLD` (3.01 s) →
+`OPERATOR_AUTH` → `operator AUTHORISED TRK-BETA_01` → `burn complete at 1.81s`, peak
+error 1.12 px, then GAMMA-01 rejected in IDLE with the gimbal still.
+
+Expect `HOLD` and `TRACK` to alternate a few times in the first second or two while the
+loop settles — HOLD resets on any excursion from the 15 px band, by design.
 
 Every state transition, firing solution and engagement is written to
 `logs/<node>-<timestamp>.jsonl` as well as published over MQTT — so the audit trail

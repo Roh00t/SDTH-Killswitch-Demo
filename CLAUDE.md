@@ -96,6 +96,15 @@ measured travel.
 > console prints still describe. Two ~0.5 s pulses, a 2.6 s burn-ceiling test, then a
 > deadman test. Matte backstop, area behind it clear, every time it is run.
 
+### `--sim-target` never touches real hardware
+
+`main.py --sim-target` replaces the camera and detector with
+`tools/simulator.py::SceneDetector` and **forces** the mock actuator; no flag combination
+lets a synthetic target reach `SerialActuator`, and `SceneDetector` raises `TypeError` if
+it is handed one. The reason is the release chain: a synthetic target satisfies "visual
+lock" with nothing real in the beam path. Keep that invariant if you extend the sim.
+MQTT stays real so the bridge, console and dashboard run against it unchanged.
+
 ### Pan/tilt bounds are not configurable — on purpose
 
 No YAML file defines them, and none should. The limits live in
@@ -142,7 +151,8 @@ python -m tools.camera_probe                        # modes, real fps, BUFFERSIZ
 python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
-pytest tests/ -q                                    # 119 tests, zero hardware
+python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
+pytest tests/ -q                                    # 199 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -244,7 +254,7 @@ a human reads.
 
 ## Testing
 
-119 tests, all hardware-free, ~0.1 s.
+199 tests, all hardware-free, ~1 s.
 
 | File | Covers |
 |---|---|
@@ -253,6 +263,7 @@ a human reads.
 | `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop |
 | `test_state_machine.py` | Transition table, sweep bounds, cue geometry, prediction |
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
+| `test_sim_scene.py` | `--sim-target` scene: refuses a real actuator, closes the loop, fresh ids on reset |
 
 **Unit tests are necessary but not sufficient.** Five real bugs were found only by running
 the whole node in mock mode — duration logging, mock free-running, wrong teardown verb,

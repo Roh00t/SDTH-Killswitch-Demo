@@ -21,11 +21,16 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+import time
+from dataclasses import dataclass, replace
+from typing import Callable, List, Optional, Tuple
 
+import numpy as np
+
+from helper.hardware.actuator import ActuatorDriver, MockActuator
 from helper.state.control import ControlGains, compute_correction
 from helper.vision.aimpoint import AimpointSolver
+from helper.vision.detector import Detector
 from helper.vision.predictor import AimpointPredictor
 from helper.vision.types import Detection
 
@@ -138,6 +143,120 @@ class SimulatedWorld:
             w=target.apparent_width_px, h=target.apparent_width_px,
             confidence=0.92, class_id=0, class_name="drone", track_id=track_id,
         )
+
+
+# ---- live-node scene --------------------------------------------------------
+#
+# Defaults for `main.py --sim-target`. The target sits where BETA-01's first cue
+# points the gimbal (pan 45, tilt ~96.5 for 6.5 deg of elevation at 350 m), so
+# the bridge's cue lands on it exactly as a correctly placed physical target
+# would. The weave gives the predictor a velocity to lead without pushing the
+# aimpoint out of the 15 px HOLD band for three seconds, which a faster weave
+# would.
+SIM_TARGET_PAN_DEG: float = 45.0
+SIM_TARGET_TILT_DEG: float = 97.0
+SIM_TARGET_WEAVE_DEG: float = 2.0
+SIM_TARGET_WEAVE_HZ: float = 0.08
+# Synthetic camera rate. ~15 fps matches the COCO fallback profile's measured
+# inference rate (63 ms at 640), so the control law steps at the cadence it
+# will see on the rig rather than at a free-running mock's.
+SIM_FRAME_FPS: float = 15.0
+# Longest single integration step. A stalled vision worker must not integrate
+# a long gap in one step and teleport the target and gimbal across the frame.
+SIM_MAX_STEP_S: float = 0.1
+
+
+class SceneDetector(Detector):
+    """Closed-loop synthetic target for running the LIVE node with no camera.
+
+    Wires the SimulatedWorld this module's convergence proof uses into the real
+    vision worker. Each detect() reads the actuator's commanded angles, moves a
+    slew-limited SimulatedGimbal toward them, advances the target, and projects
+    it into pixels. The node's own control law therefore closes the loop:
+    commanding the gimbal moves the target in frame.
+
+    MOCK ACTUATOR ONLY, enforced in the constructor. A synthetic target
+    satisfies the "visual lock" release condition with nothing real in the beam
+    path. Driven into SerialActuator, ENGAGE would fire the laser at whatever
+    the gimbal happens to face.
+
+    Thread: detect() runs on vision-worker; reset() on the tick thread at IDLE
+    entry. The actuator's pan/tilt are written by the tick thread and read here
+    without a lock. Each float read is atomic under the GIL, and a one-frame
+    skew between the two is far inside the scene's own weave.
+    """
+
+    def __init__(
+        self,
+        actuator: ActuatorDriver,
+        class_name: str,
+        frame_width: int,
+        frame_height: int,
+        horizontal_fov_deg: float,
+        target: Optional[SimulatedTarget] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Args:
+            actuator: Must be a MockActuator. Anything else raises.
+            class_name: Label to emit. Use one of the profile's target_classes
+                so the detection looks like any other to the rest of the node.
+            frame_width: Camera width from config, so the pixel scale matches
+                the node's control gains.
+            frame_height: Camera height from config.
+            horizontal_fov_deg: Camera FOV from config, for the same reason.
+            target: Scene target. Defaults to the BETA-01 intercept geometry.
+            clock: Monotonic time source. Injectable for deterministic tests.
+
+        Raises:
+            TypeError: If actuator is not a MockActuator.
+        """
+        if not isinstance(actuator, MockActuator):
+            raise TypeError(
+                f"SceneDetector requires MockActuator, got {type(actuator).__name__}. "
+                "A simulated target must never steer a real effector."
+            )
+        self._actuator = actuator
+        self._class_name = class_name
+        self._world = SimulatedWorld(frame_width, frame_height, horizontal_fov_deg)
+        self._gimbal = SimulatedGimbal()
+        self._target = target or SimulatedTarget(
+            azimuth_deg=SIM_TARGET_PAN_DEG,
+            elevation_deg=SIM_TARGET_TILT_DEG,
+            az_weave_deg=SIM_TARGET_WEAVE_DEG,
+            az_weave_hz=SIM_TARGET_WEAVE_HZ,
+        )
+        self._clock = clock
+        self._track_id = 1
+        self._last_step: Optional[float] = None
+
+    def detect(self, frame: np.ndarray) -> List[Detection]:
+        """Advance the scene to now and return the target if it is in frame.
+
+        The frame is ignored: the scene, not the pixels, is the ground truth.
+        """
+        now = self._clock()
+        dt = 0.0 if self._last_step is None else min(now - self._last_step, SIM_MAX_STEP_S)
+        self._last_step = now
+
+        status = self._actuator.last_status()
+        if status is not None:
+            self._gimbal.command(status.pan, status.tilt)
+        self._gimbal.step(dt)
+        self._target.step(dt)
+
+        seen = self._world.observe(self._target, self._gimbal, track_id=self._track_id)
+        if seen is None:
+            return []
+        return [replace(seen, class_name=self._class_name)]
+
+    def reset(self) -> None:
+        """Issue a fresh track id, as ByteTrack does after a reset.
+
+        The scene itself persists: the target does not vanish because the node
+        went to IDLE. A new id makes the next lock a new object for the
+        identity-switch and authorisation-binding logic, exactly as on the rig.
+        """
+        self._track_id += 1
 
 
 @dataclass
