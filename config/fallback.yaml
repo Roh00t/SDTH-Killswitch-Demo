@@ -6,7 +6,7 @@ node:
   tick_hz: 100          # State machine tick. Fast: it enforces every fail-safe.
 
 camera:
-  device_index: 0
+  device_index: 1
   width: 1280
   height: 720
   target_fps: 60
