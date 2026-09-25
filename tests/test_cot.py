@@ -541,3 +541,40 @@ class TestDashboardSocket:
 
         asyncio.run(serve_client(DropsMidway(), clients))
         assert clients == set()
+
+
+# ---- which address to tell a phone to open -----------------------------------
+
+
+class TestPhoneAddresses:
+    """order_candidates decides the URL the bridge prints for a phone."""
+
+    def test_the_real_demo_laptop(self):
+        # Adapter list from the Windows rig on the iPhone hotspot: three
+        # unconfigured adapters with APIPA addresses, and the Wi-Fi.
+        from tools.multicast_test import order_candidates
+
+        rig = ["169.254.185.249", "169.254.246.177", "172.20.10.9", "169.254.196.224"]
+        assert order_candidates(rig, "172.20.10.9") == ["172.20.10.9"]
+
+    def test_default_route_moves_first_even_when_already_listed(self):
+        from tools.multicast_test import order_candidates
+
+        assert order_candidates(["10.0.0.5", "192.168.1.20"], "192.168.1.20") == [
+            "192.168.1.20", "10.0.0.5"]
+
+    def test_loopback_and_duplicates_are_dropped(self):
+        from tools.multicast_test import order_candidates
+
+        assert order_candidates(["127.0.0.1", "10.0.0.5", "10.0.0.5"], None) == ["10.0.0.5"]
+
+    def test_link_local_default_is_dropped_but_others_kept(self):
+        from tools.multicast_test import order_candidates
+
+        assert order_candidates(["10.0.0.5"], "169.254.9.9") == ["10.0.0.5"]
+
+    def test_garbage_and_empty_input(self):
+        from tools.multicast_test import order_candidates
+
+        assert order_candidates([], None) == []
+        assert order_candidates(["not-an-ip", "::1"], None) == []

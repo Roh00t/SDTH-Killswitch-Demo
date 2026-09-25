@@ -396,16 +396,42 @@ as TAK interoperability.
 2. Run `tools\win_firewall_cot.ps1` as Administrator once. It now also opens inbound TCP
    8000 (the page) and 8765 (the live feed). If the laptop's network shows as `Public`,
    set it to `Private` as the script prints.
-3. Serve the page and start the bridge with its feed open to the network:
+3. Open **two separate PowerShell windows**, both in the repo folder. Each command keeps
+   running and holds its window.
+
+   **Window 1**, the page (leave it running):
 
    ```bat
    python -m http.server 8000 -d tools
+   ```
+
+   **Window 2**, the live feed:
+
+   ```bat
    python -m tools.c2_bridge --threat-start-m 420 --ws-host 0.0.0.0
    ```
 
+   If PowerShell shows a `>>` prompt, it has taken more than one line as a single input,
+   and everything after the first command will never run. Press Ctrl+C and put one
+   command in each window.
+
 4. The bridge prints the address to open, for example
-   `Phone on this network: open http://172.20.10.2:8000/c2_dashboard.html`. On the iPhone
-   hotspot the laptop is usually `172.20.10.x`. Open that in Safari.
+   `Phone on this network: open http://172.20.10.9:8000/c2_dashboard.html`. On the iPhone
+   hotspot the laptop is `172.20.10.x`.
+5. **Open that address on the laptop first.** It should load and read `CONNECTED`. If it
+   does, the page and feed are working, and anything left is between the phone and the
+   laptop.
+6. Open the same address in Safari on the iPhone. Type the full `http://`.
+
+If the laptop loads it but the phone can't, look for a Windows block rule on Python.
+Dismissing Windows' "allow access" prompt for `python.exe` creates one, and block rules
+beat the allow rule the firewall script adds. From an Administrator window:
+
+```powershell
+Get-NetFirewallRule -Direction Inbound -Action Block -Enabled True | Where-Object DisplayName -like "*python*" | Select-Object DisplayName, Profile
+```
+
+If that lists anything, run it again ending in `| Remove-NetFirewallRule` instead.
 
 Below 760 px wide the panels stack into one scrolling column, and the laptop layout is
 unchanged. The page connects back to whichever machine served it, so the laptop still
@@ -430,20 +456,34 @@ source files to anyone on the network; there are no credentials in that folder.
 Get-Service -Name mosquitto      # must read Running; else Start-Service mosquitto
 ```
 
-Launch order does not matter — the dashboard reconnects with capped backoff — but this
-order gives the cleanest console output. Start **Terminal D last**: see the timing note.
+Open **four separate PowerShell windows**, one per command. Each keeps running and holds
+its window; paste two into one window and PowerShell shows `>>` and never runs the second.
+Launch order does not matter, because the dashboard reconnects with capped backoff, but
+this order gives the cleanest console output. Start **Terminal D last**: see the timing
+note.
+
+**Terminal A**, the dashboard page. Then open `http://localhost:8000/c2_dashboard.html`.
 
 ```bat
-:: Terminal A — dashboard   (then open http://localhost:8000/c2_dashboard.html)
 python -m http.server 8000 -d tools
+```
 
-:: Terminal B — engine
+**Terminal B**, the engine:
+
+```bat
 python main.py --config config/fallback.yaml
+```
 
-:: Terminal C — operator console   (must hold window focus to receive keystrokes)
+**Terminal C**, the operator console. It must keep window focus to receive keystrokes.
+
+```bat
 python -m tools.operator_console --config config/fallback.yaml
+```
 
-:: Terminal D — threat generator
+**Terminal D**, the threat generator. Add `--ws-host 0.0.0.0` if an iPhone will show the
+dashboard, and `--cot-unicast <phone-ip>` for an ATAK phone.
+
+```bat
 python -m tools.c2_bridge --threat-start-m 420
 ```
 

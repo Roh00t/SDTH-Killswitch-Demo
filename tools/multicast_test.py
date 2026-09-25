@@ -20,12 +20,14 @@ receiver sees nothing, stop debugging and switch to `--loopback` for the demo.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import socket
 import struct
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+from typing import Iterable, List, Optional
 
 from helper.comms.cot import (
     COT_FRIENDLY_GROUND,
@@ -41,26 +43,56 @@ from helper.comms.cot import (
 )
 
 
+def order_candidates(addresses: Iterable[str], default_ip: Optional[str]) -> List[str]:
+    """Reachable IPv4 addresses, the default-route one first.
+
+    Drops loopback and link-local (169.254/16) addresses. Windows gives every
+    unconfigured adapter a 169.254 address, and no phone can reach one; listed
+    first, it sends the operator to a URL that will never load. The
+    default-route address is moved to the front even when it was already in
+    the list, because getaddrinfo's order says nothing about which adapter
+    carries traffic.
+
+    Args:
+        addresses: Candidate IPv4 strings, in any order, duplicates allowed.
+        default_ip: The address the default route leaves from, if known.
+
+    Returns:
+        De-duplicated, reachable addresses; `default_ip` first when it survives.
+    """
+    ordered: List[str] = []
+    for ip in ([default_ip] if default_ip else []) + list(addresses):
+        try:
+            addr = ipaddress.IPv4Address(ip)
+        except ValueError:
+            continue
+        if addr.is_loopback or addr.is_link_local or ip in ordered:
+            continue
+        ordered.append(ip)
+    return ordered
+
+
 def local_ips() -> list:
-    """Every non-loopback IPv4 on this host — candidates for --interface."""
+    """Reachable IPv4 addresses on this host, the default-route one first.
+
+    Candidates for --interface here, and the addresses the C2 bridge prints
+    for a phone to open. See order_candidates for what is filtered and why.
+    """
     found = []
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if not ip.startswith("127.") and ip not in found:
-                found.append(ip)
+            found.append(info[4][0])
     except socket.gaierror:
         pass
+    default_ip = None
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         probe.connect(("8.8.8.8", 80))          # no traffic sent; reveals default route
-        ip = probe.getsockname()[0]
+        default_ip = probe.getsockname()[0]
         probe.close()
-        if ip not in found:
-            found.insert(0, ip)
     except OSError:
         pass
-    return found
+    return order_candidates(found, default_ip)
 
 
 def receiver(loopback: bool, interface: str, seconds: float) -> int:
