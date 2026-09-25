@@ -27,6 +27,7 @@ from helper.comms.mqtt_client import C2Client, MockC2Client
 from helper.comms.video import VideoPublisher
 from helper.comms.schemas import OperatorAuth, SlewToCue
 from helper.hardware.actuator import ActuatorDriver, ActuatorError, MockActuator, SerialActuator
+from helper.hardware.protocol import BOOT_SETTLE_S, CONNECT_TIMEOUT_S
 from helper.state.machine import (
     EngagementState,
     IllegalTransitionError,
@@ -218,8 +219,14 @@ class KillswitchNode:
         if self._mock_actuator:
             self._actuator = MockActuator()
         else:
+            act = self._cfg["actuator"]
+            # .get() with the module defaults: a config written before these
+            # keys existed must still start the node, not KeyError on it.
             self._actuator = SerialActuator(
-                port=self._cfg["actuator"]["port"], baud=self._cfg["actuator"]["baud"]
+                port=act["port"],
+                baud=act["baud"],
+                connect_timeout=act.get("connect_timeout_s", CONNECT_TIMEOUT_S),
+                boot_settle_s=act.get("boot_settle_s", BOOT_SETTLE_S),
             )
         self._actuator.connect()
 

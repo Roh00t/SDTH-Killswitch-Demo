@@ -107,6 +107,17 @@ actuator:
   # On macOS/Linux set this back to "auto" or to /dev/cu.usbserial-<n>.
   port: "COM3"
   baud: 921600
+  # Link bring-up budget. Opening the port asserts DTR, which RESETS the ESP32;
+  # both waits below happen on every connect, so the real budget is their sum.
+  #
+  # The ESP32-S3-N16R8 boots slower than the WROOM-1 these were first tuned on
+  # (8 MB PSRAM init), and the old 2.0 + 3.0 sat close enough to its real boot
+  # time that connect() succeeded or failed by luck. If you still see
+  # "No status from firmware ... within", raise connect_timeout_s — never
+  # suppress the DTR reset. The reset is what makes "connected" mean "known
+  # state", and it is what emits the boot banner reporting PWM attach failures.
+  boot_settle_s: 2.0
+  connect_timeout_s: 6.0
   stow_pan_deg: 90.0
   stow_tilt_deg: 90.0
 

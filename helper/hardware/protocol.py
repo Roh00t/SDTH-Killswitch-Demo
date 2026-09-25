@@ -27,6 +27,19 @@ MAX_BURN_MS: int = 2000
 
 BAUD_RATE: int = 921600
 
+# --- link bring-up ----------------------------------------------------------
+# Opening the port asserts DTR, which resets the ESP32. Both values below are
+# waited out on EVERY connect, so the real bring-up budget is their sum.
+#
+# Sized for the ESP32-S3-N16R8, whose 8 MB PSRAM init makes it materially slower
+# to boot than the WROOM-1 these numbers were first tuned on. The old 2.0 + 3.0
+# budget sat close enough to that board's actual boot time that connect()
+# succeeded or failed by luck — the same command working from one tool and
+# failing from another is the signature of a marginal budget, not of two
+# different code paths.
+BOOT_SETTLE_S: float = 2.0
+CONNECT_TIMEOUT_S: float = 6.0
+
 # Error codes emitted by firmware as `ERR <code> <detail>`.
 ERR_UNKNOWN_CMD = "E01"
 ERR_BAD_FORMAT = "E02"

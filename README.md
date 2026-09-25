@@ -308,6 +308,22 @@ Positioning confirmed separately via `--interactive` (`a <pan> <tilt>`).
 > console prints still describe. Two ~0.5 s pulses, a 2.6 s burn-ceiling test, then a
 > deadman test. Matte backstop, area behind it clear, every time.
 
+**If the engine dies with `No status from firmware on COM3 within ...`.** Opening the
+port asserts DTR, which resets the ESP32; the driver waits out that boot before it expects
+a status frame. The S3-N16R8 boots slower than the WROOM-1 the original budget was tuned
+on, so the budget is now `boot_settle_s: 2.0` + `connect_timeout_s: 6.0` in the
+`actuator:` block of each config. Raise `connect_timeout_s` if it still trips.
+
+**Do not suppress the DTR reset to "fix" this.** The reset is what makes *connected* mean
+*known state* — without it the host attaches to a board in whatever condition the last run
+left it — and it is what triggers the `OK BOOT ... pan_ch=N tilt_ch=N` banner, the only
+report of a PWM attach failure that is otherwise completely silent. A slow boot needs a
+longer wait, not a suppressed reset.
+
+Every successful connect now logs its measured bring-up against the budget, and warns
+above 75% of it. Watch that number: a first status landing near the budget is the warning
+that the next connect may not.
+
 **Mosquitto runs as a service.** Confirm before launching anything:
 
 ```powershell
