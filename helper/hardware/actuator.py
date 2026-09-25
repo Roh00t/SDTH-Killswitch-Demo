@@ -15,6 +15,8 @@ from typing import List, Optional, Tuple
 from helper.hardware.protocol import (
     BAUD_RATE,
     ERROR_TEXT,
+    BOOT_SETTLE_S,
+    CONNECT_TIMEOUT_S,
     HEARTBEAT_INTERVAL_S,
     ActuatorStatus,
     clamp_pan,
@@ -157,7 +159,8 @@ class SerialActuator(ActuatorDriver):
         self,
         port: str,
         baud: int = BAUD_RATE,
-        connect_timeout: float = 3.0,
+        connect_timeout: float = CONNECT_TIMEOUT_S,
+        boot_settle_s: float = BOOT_SETTLE_S,
     ) -> None:
         """Configure the link. Does not open it; call `connect()`.
 
@@ -166,11 +169,16 @@ class SerialActuator(ActuatorDriver):
                 not the native-USB CDC port — the bridge stays enumerated across
                 ESP32 resets).
             baud: Line rate.
-            connect_timeout: Seconds to wait for the firmware's first status.
+            connect_timeout: Seconds to wait for the firmware's first status
+                AFTER the boot settle. Raise it, never the DTR behaviour, when a
+                board boots slowly: the reset is what guarantees a known state.
+            boot_settle_s: Seconds to wait out the DTR-triggered ESP32 reset
+                before reading the boot banner.
         """
         self._port_name = port
         self._baud = baud
         self._connect_timeout = connect_timeout
+        self._boot_settle_s = boot_settle_s
 
         self._serial = None
         self._write_lock = threading.Lock()
@@ -214,7 +222,14 @@ class SerialActuator(ActuatorDriver):
         # ESP32 resets when the bridge asserts DTR; wait out the boot. Capture
         # the banner BEFORE discarding the buffer — it carries the PWM attach
         # state, which is the only report of a failure that is otherwise silent.
-        time.sleep(2.0)
+        #
+        # The reset is deliberate and must not be suppressed. It is what makes
+        # "connected" mean "known state": without it the host attaches to a
+        # board left in whatever condition the last run ended in, and the boot
+        # banner — the only report of a failed PWM attach — is never emitted.
+        # A board that boots slowly needs a longer wait, not a suppressed reset.
+        opened_at = time.monotonic()
+        time.sleep(self._boot_settle_s)
         try:
             pending = self._serial.read(self._serial.in_waiting or 0)
             for line in pending.decode("ascii", errors="replace").splitlines():
@@ -244,11 +259,31 @@ class SerialActuator(ActuatorDriver):
             self.close()
             raise ActuatorError(
                 f"No status from firmware on {self._port_name} within "
-                f"{self._connect_timeout}s. Check the board is running the "
-                f"actuator sketch and that you are on the UART bridge port."
+                f"{self._boot_settle_s + self._connect_timeout:.1f}s "
+                f"({self._boot_settle_s:.1f}s boot settle + "
+                f"{self._connect_timeout:.1f}s status wait). Check the board is "
+                f"running the actuator sketch and that you are on the UART "
+                f"bridge port, NOT the native USB-CDC port. If the board is "
+                f"known good, raise actuator.connect_timeout_s in the config — "
+                f"a slow boot needs a longer wait, never a suppressed reset."
             )
         self._link_established = True
-        logger.info("Actuator connected on %s: %s", self._port_name, self._last_status)
+
+        # Report the measured bring-up, not just success. A first status landing
+        # near the budget is the warning that the next connect may not, and it
+        # is invisible unless it is printed.
+        elapsed = time.monotonic() - opened_at
+        budget = self._boot_settle_s + self._connect_timeout
+        logger.info(
+            "Actuator connected on %s in %.2fs of a %.1fs budget: %s",
+            self._port_name, elapsed, budget, self._last_status,
+        )
+        if elapsed > budget * 0.75:
+            logger.warning(
+                "First status took %.2fs of the %.1fs bring-up budget. Raise "
+                "actuator.connect_timeout_s before this becomes intermittent.",
+                elapsed, budget,
+            )
 
     def _write(self, payload: bytes) -> None:
         """Single writer. Interleaved writes from two threads corrupt framing."""
