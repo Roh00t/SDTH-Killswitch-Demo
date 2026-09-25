@@ -281,6 +281,33 @@ family now, so `"auto"` works; the pin just removes discovery from the critical 
 **Never select the port named `USB Serial Device`** — that is the S3's native USB-CDC,
 which re-enumerates on every board reset and kills the host's serial handle mid-run.
 
+### Hardware verification log
+
+**Actuator path — verified on the Windows rig.** CH343 bridge on `COM3`, 921600 baud,
+`ActuatorStatus` frames clean with no drops or checksum failures. Gimbal tracks absolute
+angle commands (`python -m tools.serial_probe --port COM3 --interactive`, then
+`a <pan> <tilt>`); centre (90, 90) and tilt to 48 deg confirmed with no binding,
+over-travel or brownout.
+
+**Still outstanding before the stack is integration-ready:**
+
+| Gap | Why it matters |
+|---|---|
+| Travel corners untested | `--servo-sweep` commands pan 5/175 and tilt 48/132 — inside the real bounds of pan 0/180 and tilt 45/135. `SweepController` and `cue_to_gimbal` command the true bounds, so SCAN goes 3–5 deg past anything tested. |
+| Effector interlocks untested | Arm/disarm, fire-while-disarmed refusal, e-stop, 2000 ms burn ceiling, 250 ms deadman. Interactive positioning exercises none of them. |
+| Vision + C2 plane untested on the rig | YOLO lock, bridge, dashboard, authorisation gate. |
+
+Close the first two with one command, which drives the gimbal to the real corners via
+`set_angles(999, -999)` and then runs 13 interlock checks:
+
+```bat
+python -m tools.serial_probe --port COM3
+```
+
+> ⚠️ **This fires the effector.** It is a KY-008 laser, not the LED the console prints
+> still describe — twice for ~0.5 s, then a 2.6 s burn-ceiling test, then a deadman test.
+> Point it at a matte backstop and keep the area behind it clear before running it.
+
 **Mosquitto runs as a service.** Confirm before launching anything:
 
 ```powershell

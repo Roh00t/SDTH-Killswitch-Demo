@@ -64,7 +64,11 @@ engagement:
   track_loss_timeout_s: 1.0  # No target for this long -> back to SCAN.
   scan_timeout_s: 30.0       # No detection for this long -> IDLE.
   auth_timeout_s: 10.0       # No operator decision -> back to TRACK.
-  burn_duration_s: 2.0       # Firmware enforces its own ceiling regardless.
+  # 1.8, NOT 2.0. The firmware ceiling is MAX_BURN_MS = 2000 and its clock
+  # starts when it parses L1, before the host's does — at 2.0 the firmware wins
+  # every nominal burn and logs a clean engagement as an "E06 burn ceiling"
+  # safety trip. 200 ms of margin gives nominal completion back to the host.
+  burn_duration_s: 1.8
 
 scan:
   pan_step_deg: 4.0

@@ -61,6 +61,51 @@ Three independent blockers, any one of which is disqualifying:
 
 Onboard inference is not a third option: YOLO11s does not run on an S3.
 
+### HITL verification status — actuator path
+
+**Verified on the Windows rig:**
+
+- CH343 bridge enumerates as `COM3`; 921600 baud link stable.
+- `ActuatorStatus` frames arrive clean — no drops, no checksum failures.
+- Gimbal tracks absolute angle commands via `serial_probe --interactive` (`a <pan> <tilt>`).
+- Centre (90, 90) and tilt to 48 deg with no binding, over-travel or brownout.
+
+**NOT yet verified. The stack is not integration-ready until these pass:**
+
+- **The travel corners.** `--servo-sweep` commands pan 5/175 and tilt 48/132, which sit
+  5 deg and 3 deg *inside* the software bounds of pan 0/180 and tilt 45/135. But
+  `SweepController.step()` and `cue_to_gimbal()` both command the true bounds, so SCAN
+  will drive the gimbal past anything that has been physically tested. The labels in
+  `servo_sweep()` read "(0 deg)" and "(45 deg)" while commanding 5 and 48 — believe the
+  numbers, not the labels.
+- **Every effector interlock**: arm/disarm, fire-while-disarmed refusal, e-stop, the
+  2000 ms burn ceiling, the 250 ms deadman. Interactive positioning exercises none of them.
+- The vision pipeline, and the C2 plane end to end on the real box.
+
+**One command closes the first two gaps:**
+
+```bash
+python -m tools.serial_probe --port COM3
+```
+
+`run_checks()` issues `set_angles(999, -999)`, so the firmware clamps to pan 180 /
+tilt 45 — the real corners — and then runs 13 interlock checks.
+
+> **That command fires the effector.** It is now a KY-008 laser, not the LED its console
+> prints still describe: twice for ~0.5 s, then a full 2.6 s burn-ceiling test, then a
+> deadman test. Point it at a matte backstop before running it.
+
+### Pan/tilt bounds are not configurable — on purpose
+
+No YAML file defines them, and none should. The limits live in
+`helper/hardware/protocol.py` (`PAN_MIN_DEG` 0, `PAN_MAX_DEG` 180, `TILT_MIN_DEG` 45,
+`TILT_MAX_DEG` 135) and again in `esp32_actuator.ino`, which is architectural rule 9:
+bounds enforced twice, host-side before transmit and firmware before the PWM write. A
+config knob would be a third authority that the firmware does not honour. What the config
+*does* hold is `scan.pan_step_deg` / `tilt_step_deg` (sweep granularity),
+`scan.boresight_azimuth_deg` (cue geometry) and `actuator.stow_pan_deg` / `stow_tilt_deg`
+(the safe-harbour pose) — none of which are limits.
+
 Weights train on **Google Colab**, land as `.pt`/`.onnx`, and are **gitignored**.
 
 ---
