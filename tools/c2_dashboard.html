@@ -158,13 +158,13 @@
 
   <section class="panel">
     <div class="ph"><h2>PANEL C · NODE 01 TELEMETRY</h2>
-      <span class="tag" id="telTag">COMMANDED ANGLES — NO POSITION FEEDBACK</span></div>
+      <span class="tag" id="telTag">NO NODE TELEMETRY</span></div>
     <div class="pb"><div class="tel" id="tel">
       <div class="cell"><span class="lbl">PAN (CMD)</span><span class="val" id="tPan">—</span><span class="sub">deg · 0–180</span></div>
       <div class="cell"><span class="lbl">TILT (CMD)</span><span class="val" id="tTilt">—</span><span class="sub">deg · 45–135</span></div>
       <div class="cell"><span class="lbl">DEADMAN AGE</span><span class="val" id="tDead">—</span><span class="sub">firmware cuts at 0.250 s</span></div>
       <div class="cell"><span class="lbl">POINTING ERROR</span><span class="val" id="tErr">—</span><span class="sub">px · HOLD band ±15</span></div>
-      <div class="cell"><span class="lbl">HOLD PROGRESS</span><span class="val" id="tHold">—</span>
+      <div class="cell"><span class="lbl" id="tHoldLbl">HOLD PROGRESS</span><span class="val" id="tHold">—</span>
         <div class="bar"><i id="tHoldBar"></i></div></div>
       <div class="cell"><span class="lbl">GLASS→PHOTON LEAD</span><span class="val" id="tLead">—</span><span class="sub" id="tLeadSub">measured + estimated</span></div>
       <div class="cell"><span class="lbl">ARMED / EFFECTOR</span><span class="val" id="tArm">—</span><span class="sub" id="tArmSub">two-key interlock</span></div>
@@ -399,9 +399,23 @@ function renderTelemetry(){
   err.style.color = (typeof n.error_px !== "number") ? C.dim
                   : n.error_px <= 15 ? C.green : C.amber;
 
+  // In OPERATOR_AUTH the operator needs the decision window, not the hold
+  // timer (which read "12.1 / 3.0 s" there). The node sends auth_remaining_s
+  // only while that window is open, and hold_s only while in HOLD.
   const hs = n.hold_s || 0, ht = n.hold_target_s || 3.0;
-  $("tHold").textContent = hs > 0 ? `${hs.toFixed(1)} / ${ht.toFixed(1)} s` : "—";
-  $("tHoldBar").style.width = Math.min(100, (hs/ht)*100) + "%";
+  const ar = n.auth_remaining_s, at = n.auth_timeout_s || 10.0;
+  const holdEl = $("tHold"), holdBar = $("tHoldBar");
+  if (typeof ar === "number"){
+    $("tHoldLbl").textContent = "AUTH WINDOW";
+    holdEl.textContent = `${ar.toFixed(1)} s left`;
+    holdEl.style.color = C.amber;
+    holdBar.style.width = Math.max(0, Math.min(100, (ar/at)*100)) + "%";
+  } else {
+    $("tHoldLbl").textContent = "HOLD PROGRESS";
+    holdEl.textContent = hs > 0 ? `${hs.toFixed(1)} / ${ht.toFixed(1)} s` : "—";
+    holdEl.style.color = "";
+    holdBar.style.width = Math.min(100, (hs/ht)*100) + "%";
+  }
 
   $("tLead").textContent = (typeof n.total_lead_ms === "number") ? Math.round(n.total_lead_ms)+" ms" : "—";
   $("tLeadSub").textContent = (typeof n.compute_latency_ms === "number")
@@ -416,8 +430,11 @@ function renderTelemetry(){
 
   const up = n.uptime_ms;
   $("tUp").textContent = (typeof up === "number") ? (up/1000).toFixed(0)+" s" : "—";
-  $("telTag").textContent = (n.mock_actuator === false)
-    ? "COMMANDED ANGLES — SG90 HAS NO POSITION FEEDBACK"
+  // Same test as the header's gimbal pill. The bridge sends an empty node
+  // object until the node reports and again once its link is lost, and a
+  // mock/physical claim above a column of dashes would describe nothing.
+  $("telTag").textContent = (n.mock_actuator === undefined) ? "NO NODE TELEMETRY"
+    : (n.mock_actuator === false) ? "COMMANDED ANGLES — SG90 HAS NO POSITION FEEDBACK"
     : "MOCK ACTUATOR — NO PHYSICAL GIMBAL ATTACHED";
 }
 

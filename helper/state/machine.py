@@ -110,6 +110,19 @@ class StateMachine:
         with self._lock:
             return time.monotonic() - self._entered_at
 
+    def snapshot(self) -> Tuple[EngagementState, float]:
+        """The current state and seconds spent in it, read under one lock.
+
+        Reading `state` and `time_in_state` separately can straddle a
+        transition, including a `force_idle` from the vision thread, and pair
+        one state with another's age. Any thread may call.
+
+        Returns:
+            (state, seconds in that state), monotonic.
+        """
+        with self._lock:
+            return self._state, time.monotonic() - self._entered_at
+
     def is_in(self, *states: EngagementState) -> bool:
         with self._lock:
             return self._state in states

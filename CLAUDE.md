@@ -127,6 +127,10 @@ deadline and drops laggards, because `websockets` blocks `send()` once ~2 MB que
 client that has stopped reading. Without the deadline, one locked phone freezes every
 screen.
 
+The dashboard obeys the map's `NO LINK` rule too: `FleetState.node1_view()` sends
+`NO LINK` and an empty telemetry object, so Panel C reads `NO NODE TELEMETRY` rather than
+a dead node's frozen numbers.
+
 ### Pan/tilt bounds are not configurable — on purpose
 
 No YAML file defines them, and none should. The limits live in
@@ -174,7 +178,7 @@ python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 231 tests, zero hardware
+pytest tests/ -q                                    # 243 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -276,16 +280,16 @@ a human reads.
 
 ## Testing
 
-231 tests, all hardware-free, ~2 s.
+243 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
 | `test_aimpoint.py` | Offset math, clamping, resolution gate, target selection |
 | `test_comms.py` | Payload validation, hostile inputs, token handling |
 | `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop |
-| `test_state_machine.py` | Transition table, sweep bounds, cue geometry, prediction |
+| `test_state_machine.py` | Transition table, sweep bounds, cue geometry, prediction, auth-window telemetry |
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
-| `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket |
+| `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket, dashboard NO LINK |
 | `test_sim_scene.py` | `--sim-target` scene: refuses a real actuator, closes the loop, fresh ids on reset |
 
 **Unit tests are necessary but not sufficient.** Five real bugs were found only by running

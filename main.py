@@ -437,15 +437,29 @@ class KillswitchNode:
         are the firmware's commanded angles (SG90s have no feedback — never
         present them as measured), and `status_age_s` is the true age of the
         last ST frame, which is the host-side view of the firmware deadman.
+
+        The hold timer is not reset when HOLD hands over to OPERATOR_AUTH, so
+        reporting it outside HOLD showed "12.1 / 3.0 s" while the operator was
+        being asked to decide. `hold_s` is therefore reported only in HOLD, and
+        `auth_remaining_s` carries the decision window in OPERATOR_AUTH (None
+        elsewhere). State and age are read together, so both values always
+        belong to the state published with them.
         """
         if self._c2 is None or self._telemetry_limiter.due() is False:
             return
 
         status = self._actuator.last_status() if self._actuator else None
         snapshot = self._snapshots.latest()
+        state, time_in_state = self._machine.snapshot()
         hold_s = (
             time.monotonic() - self._hold_started_at
-            if self._hold_started_at is not None else 0.0
+            if state is EngagementState.HOLD and self._hold_started_at is not None
+            else 0.0
+        )
+        auth_timeout_s = self._cfg["engagement"]["auth_timeout_s"]
+        auth_remaining_s = (
+            round(max(0.0, auth_timeout_s - time_in_state), 2)
+            if state is EngagementState.OPERATOR_AUTH else None
         )
         detail = {
             "pan_deg": round(status.pan, 1) if status else None,
@@ -461,13 +475,15 @@ class KillswitchNode:
             if snapshot and snapshot.error_px != float("inf") else None,
             "hold_s": round(hold_s, 2),
             "hold_target_s": self._cfg["engagement"]["hold_duration_s"],
+            "auth_remaining_s": auth_remaining_s,
+            "auth_timeout_s": auth_timeout_s,
             "target_id": self._active_target_id,
             "track_id": self._active_track_id,
             "compute_latency_ms": round(self._latency.compute_latency_s * 1000.0, 1),
             "total_lead_ms": round(self._latency.total_lead_s * 1000.0, 1),
             "mock_actuator": self._mock_actuator,
         }
-        self._c2.publish_telemetry(self._machine.state.value, detail)
+        self._c2.publish_telemetry(state.value, detail)
 
     def _pump_video(self) -> None:
         """Publish an annotated frame to the operator console. Best-effort."""

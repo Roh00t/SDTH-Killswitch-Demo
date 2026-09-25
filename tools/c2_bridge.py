@@ -283,6 +283,20 @@ class FleetState:
         ]
         return min(live, key=lambda t: t.time_to_impact_s) if live else None
 
+    def node1_view(self) -> Tuple[str, dict]:
+        """What the dashboard may claim for the real node: (state, telemetry).
+
+        The map marker's rule, applied to the dashboard. Before the first
+        report, after the last-will, or after NODE_LINK_TIMEOUT_S of silence
+        the state reads NO LINK and the telemetry is empty. Without this the
+        dashboard kept a dead node's last state pill and frozen numbers on
+        screen indefinitely. Caller holds the lock.
+        """
+        node = self.nodes.get("KILLSWITCH_NODE_01")
+        if node is None or node.link_state() == "NO LINK":
+            return "NO LINK", {}
+        return self.node1_state, dict(self.node1_telemetry)
+
     def log(self, event: str, detail: str) -> None:
         self.events.append({"ts": time.time(), "event": event, "detail": detail})
         del self.events[:-60]
@@ -692,10 +706,11 @@ async def task_websocket(fleet: FleetState, host: str, port: int) -> None:
             async with fleet.lock:
                 threats = sorted((t.to_dict() for t in fleet.threats.values()),
                                  key=lambda d: d["tti_s"])
+                node1_state, node1_telemetry = fleet.node1_view()
                 payload = {
                     "ts": time.time(),
-                    "node1_state": fleet.node1_state,
-                    "node": dict(fleet.node1_telemetry),
+                    "node1_state": node1_state,
+                    "node": node1_telemetry,
                     "nodes": [n.to_dict() for n in fleet.nodes.values()],
                     "threats": threats,
                     "events": fleet.events[-20:],
@@ -704,7 +719,7 @@ async def task_websocket(fleet: FleetState, host: str, port: int) -> None:
                 }
             enc = encoders["KILLSWITCH_NODE_01"]
             payload["mavlink"] = [
-                enc.heartbeat(armed=fleet.node1_state in ("ENGAGE", "OPERATOR_AUTH")).to_dict(),
+                enc.heartbeat(armed=node1_state in ("ENGAGE", "OPERATOR_AUTH")).to_dict(),
                 enc.global_position_int(fleet.base_lat, fleet.base_lon,
                                         fleet.base_hae).to_dict(),
             ]

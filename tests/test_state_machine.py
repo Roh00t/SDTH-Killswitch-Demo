@@ -1,6 +1,8 @@
 """State machine, sweep and prediction tests. No hardware, no model, no broker."""
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from helper.state.machine import (
@@ -109,6 +111,85 @@ class TestForceIdle:
         machine.transition_to(S.SCAN, "cue")
         machine.force_idle("fault")
         assert [t.to_state for t in seen] == [S.SCAN, S.IDLE]
+
+    def test_snapshot_pairs_state_with_its_own_age(self):
+        machine = StateMachine()
+        advance(machine, S.SCAN, S.TRACK, S.HOLD, S.OPERATOR_AUTH)
+        machine._entered_at -= 4.0
+        state, age = machine.snapshot()
+        assert state is S.OPERATOR_AUTH
+        assert age == pytest.approx(4.0, abs=0.05)
+
+        machine.force_idle("fault")
+        state, age = machine.snapshot()
+        assert state is S.IDLE
+        assert age < 1.0, "a transition must restart the age with the state"
+
+
+class TestAuthCountdownTelemetry:
+    """Panel C shows the decision window in OPERATOR_AUTH, not the hold timer.
+
+    The hold timer keeps running from when HOLD began, so the dashboard read
+    "12.1 / 3.0 s" for the whole auth window, which looks like a fault.
+    """
+
+    @staticmethod
+    def _node_in(*path):
+        from main import KillswitchNode, _RateGate, load_config
+
+        node = KillswitchNode(
+            load_config("config/fallback.yaml"), sim_target=True, mock_c2=True
+        )
+        node._build_c2()                            # MockC2Client: records publishes
+        node._telemetry_limiter = _RateGate(hz=0)   # every call publishes
+        advance(node._machine, *path)
+        return node
+
+    @staticmethod
+    def _last_telemetry(node):
+        node._pump_telemetry()
+        kind, state, detail = node._c2.published[-1]
+        assert kind == "telemetry"
+        return state, detail
+
+    def test_absent_outside_the_auth_window(self):
+        node = self._node_in(S.SCAN, S.TRACK, S.HOLD)
+        state, detail = self._last_telemetry(node)
+        assert state == "HOLD"
+        assert detail["auth_remaining_s"] is None
+        assert detail["auth_timeout_s"] == node._cfg["engagement"]["auth_timeout_s"]
+
+    def test_counts_down_through_the_window(self):
+        node = self._node_in(S.SCAN, S.TRACK, S.HOLD, S.OPERATOR_AUTH)
+        timeout = node._cfg["engagement"]["auth_timeout_s"]
+
+        state, detail = self._last_telemetry(node)
+        assert state == "OPERATOR_AUTH"
+        assert detail["auth_remaining_s"] == pytest.approx(timeout, abs=0.05)
+
+        node._machine._entered_at -= 7.5
+        _, detail = self._last_telemetry(node)
+        assert detail["auth_remaining_s"] == pytest.approx(timeout - 7.5, abs=0.05)
+
+    def test_hold_time_is_reported_only_while_holding(self):
+        node = self._node_in(S.SCAN, S.TRACK, S.HOLD)
+        node._hold_started_at = time.monotonic() - 1.5
+        _, detail = self._last_telemetry(node)
+        assert detail["hold_s"] == pytest.approx(1.5, abs=0.05)
+
+        # The timer is not reset on the way into OPERATOR_AUTH, or on the auth
+        # timeout back to TRACK. Neither state may report it as hold progress.
+        node._hold_started_at = time.monotonic() - 13.0
+        for state in (S.OPERATOR_AUTH, S.TRACK):
+            node._machine.transition_to(state, "test")
+            _, detail = self._last_telemetry(node)
+            assert detail["hold_s"] == 0.0, state
+
+    def test_never_negative_once_the_window_has_passed(self):
+        node = self._node_in(S.SCAN, S.TRACK, S.HOLD, S.OPERATOR_AUTH)
+        node._machine._entered_at -= node._cfg["engagement"]["auth_timeout_s"] + 3.0
+        _, detail = self._last_telemetry(node)
+        assert detail["auth_remaining_s"] == 0.0
 
 
 class TestSweepBoundsBug:

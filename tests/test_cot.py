@@ -401,8 +401,30 @@ class TestHonestLabels:
         for threat in fleet.threats.values():
             assert threat.to_cot().remarks.startswith("SIMULATED THREAT | ")
 
+    def test_dashboard_reads_no_link_before_any_telemetry(self):
+        from tools.c2_bridge import FleetState
+
+        assert FleetState(simulated_nodes=0).node1_view() == ("NO LINK", {})
+
+    def test_dashboard_drops_a_silent_nodes_frozen_telemetry(self):
+        import time
+
+        from tools.c2_bridge import NODE_LINK_TIMEOUT_S, FleetState
+
+        fleet = FleetState(simulated_nodes=0)
+        n1 = fleet.nodes["KILLSWITCH_NODE_01"]
+        fleet.node1_state = n1.status = "ENGAGE"
+        fleet.node1_telemetry = {"pan_deg": 45.0, "mock_actuator": False}
+        n1.reported, n1.last_seen = True, time.monotonic()
+        assert fleet.node1_view() == ("ENGAGE", {"pan_deg": 45.0, "mock_actuator": False})
+
+        n1.last_seen = time.monotonic() - NODE_LINK_TIMEOUT_S - 1.0
+        assert fleet.node1_view() == ("NO LINK", {}), \
+            "a silent node's last numbers must not stay on the dashboard"
+
     def test_last_will_drops_the_map_to_no_link_at_once(self):
-        """The node's MQTT last-will must end the link, not refresh it."""
+        """The node's MQTT last-will must end the link, not refresh it, on the
+        map and on the dashboard alike."""
         import asyncio
         import json
 
@@ -437,9 +459,11 @@ class TestHonestLabels:
         live = {"state": "ENGAGE", "target_id": "TRK-BETA_01", "pan_deg": 45.0}
         asyncio.run(task_mqtt_consume(fleet, FakeClient([live])))
         assert fleet.nodes["KILLSWITCH_NODE_01"].to_cot().callsign == "KILLSWITCH-01 [ENGAGE]"
+        assert fleet.node1_view() == ("ENGAGE", live)
 
         asyncio.run(task_mqtt_consume(fleet, FakeClient([{"event": "node_lost"}])))
         assert fleet.nodes["KILLSWITCH_NODE_01"].to_cot().callsign == "KILLSWITCH-01 [NO LINK]"
+        assert fleet.node1_view() == ("NO LINK", {})
 
 
 # ---- dashboard socket: output-only, and one stalled phone can't freeze it ----
