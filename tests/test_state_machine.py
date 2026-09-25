@@ -324,3 +324,115 @@ class TestSnapshotHolder:
 
     def test_empty_snapshot_has_no_target(self):
         assert TrackSnapshot(frame_id=1, captured_at=0.0, processed_at=0.0).has_target is False
+
+
+class TestFailSafeGaps:
+    """Two paths that bypassed the safe harbour.
+
+    A force_idle from the vision thread left the effector on until the
+    firmware burn ceiling, and an auth that missed its window fired the next
+    one with no fresh decision.
+    """
+
+    @staticmethod
+    def _node(actuator=None):
+        from helper.hardware.actuator import MockActuator
+        from main import KillswitchNode, load_config
+
+        node = KillswitchNode(
+            load_config("config/fallback.yaml"), sim_target=True, mock_c2=True
+        )
+        node._build_c2()
+        node._actuator = actuator or MockActuator()
+        node._actuator.connect()
+        node._audit_records = []
+        node._audit.write = lambda event, detail: node._audit_records.append((event, detail))
+        return node
+
+    @staticmethod
+    def _burning(node):
+        advance(node._machine, S.SCAN, S.TRACK, S.HOLD, S.OPERATOR_AUTH, S.ENGAGE)
+        node._actuator.arm()
+        node._actuator.set_effector(True)
+        node._resafe_if_forced_idle()          # a tick in ENGAGE clears the flag
+        assert node._actuator.effector_on
+
+    def test_forced_idle_mid_burn_is_safed_within_one_tick(self):
+        node = self._node()
+        self._burning(node)
+
+        node._machine.force_idle("detector fault: test")   # the vision thread's call
+        node._resafe_if_forced_idle()
+
+        act, cfg = node._actuator, node._cfg["actuator"]
+        assert not act.effector_on and not act.armed
+        assert (act.pan, act.tilt) == (cfg["stow_pan_deg"], cfg["stow_tilt_deg"])
+        assert node._idle_safed
+        assert node._audit_records[-1] == (
+            "forced_idle_safed", {"cause": "FORCED: detector fault: test", "safed": True})
+
+    def test_safed_idle_is_not_safed_again(self):
+        node = self._node()
+        self._burning(node)
+        node._machine.force_idle("detector fault: test")
+        node._resafe_if_forced_idle()
+        commands = len(node._actuator.history)
+        node._resafe_if_forced_idle()
+        assert len(node._actuator.history) == commands
+
+    def test_failed_safing_retries_at_the_deadman_period(self):
+        from helper.hardware.actuator import ActuatorError, MockActuator
+        from helper.hardware.protocol import DEADMAN_TIMEOUT_MS
+
+        class Flaky(MockActuator):
+            failures = 1
+
+            def set_effector(self, on):
+                if not on and self.failures:
+                    self.failures -= 1
+                    raise ActuatorError("serial write failed")
+                super().set_effector(on)
+
+        node = self._node(Flaky())
+        self._burning(node)
+        node._machine.force_idle("detector fault: test")
+
+        node._resafe_if_forced_idle()
+        assert not node._idle_safed and node._actuator.effector_on
+        assert node._next_safe_attempt_at - time.monotonic() == pytest.approx(
+            DEADMAN_TIMEOUT_MS / 1000.0, abs=0.05)
+
+        node._resafe_if_forced_idle()          # not due yet: no second attempt
+        assert node._actuator.effector_on
+
+        node._next_safe_attempt_at = 0.0       # the deadman period has passed
+        node._resafe_if_forced_idle()
+        assert node._idle_safed and not node._actuator.effector_on
+
+    def test_stale_auth_is_discarded_when_the_window_opens(self):
+        from helper.comms.schemas import OperatorAuth
+
+        node = self._node()
+        advance(node._machine, S.SCAN, S.TRACK, S.HOLD)
+        node._active_target_id = "TRK-BETA_01"
+        # SPACE that landed after the previous window had already timed out.
+        node._c2.inject(OperatorAuth(auth=True, target_id="TRK-BETA_01",
+                                     token="sdth-demo-token", nonce="late"))
+
+        node._open_auth_window(TrackSnapshot(frame_id=1, captured_at=0.0,
+                                             processed_at=0.0, error_px=2.0), 3.0)
+
+        assert node._machine.state is S.OPERATOR_AUTH
+        assert node._c2.poll() is None, "a pre-window auth must not reach this window"
+
+    def test_a_decision_inside_the_window_still_arrives(self):
+        from helper.comms.schemas import OperatorAuth
+
+        node = self._node()
+        advance(node._machine, S.SCAN, S.TRACK, S.HOLD)
+        node._open_auth_window(TrackSnapshot(frame_id=1, captured_at=0.0,
+                                             processed_at=0.0, error_px=2.0), 3.0)
+        auth = OperatorAuth(auth=True, target_id="TRK-BETA_01",
+                            token="sdth-demo-token", nonce="in-window")
+        node._c2.inject(auth)
+        assert node._c2.poll() == auth

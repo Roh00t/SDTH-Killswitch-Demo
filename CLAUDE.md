@@ -182,7 +182,7 @@ python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 245 tests, zero hardware
+pytest tests/ -q                                    # 250 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -284,14 +284,14 @@ a human reads.
 
 ## Testing
 
-245 tests, all hardware-free, ~2 s.
+250 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
 | `test_aimpoint.py` | Offset math, clamping, resolution gate, target selection |
 | `test_comms.py` | Payload validation, hostile inputs, token handling |
 | `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop |
-| `test_state_machine.py` | Transition table, sweep bounds, cue geometry, prediction, auth-window telemetry |
+| `test_state_machine.py` | Transition table, sweep bounds, cue geometry, prediction, auth-window telemetry, forced-IDLE safing, stale-auth drain |
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
 | `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket, dashboard NO LINK, strict-JSON frames |
 | `test_sim_scene.py` | `--sim-target` scene: refuses a real actuator, closes the loop, fresh ids on reset |

@@ -27,7 +27,7 @@ from helper.comms.mqtt_client import C2Client, MockC2Client
 from helper.comms.video import VideoPublisher
 from helper.comms.schemas import OperatorAuth, SlewToCue
 from helper.hardware.actuator import ActuatorDriver, ActuatorError, MockActuator, SerialActuator
-from helper.hardware.protocol import BOOT_SETTLE_S, CONNECT_TIMEOUT_S
+from helper.hardware.protocol import BOOT_SETTLE_S, CONNECT_TIMEOUT_S, DEADMAN_TIMEOUT_MS
 from helper.state.machine import (
     EngagementState,
     IllegalTransitionError,
@@ -148,6 +148,12 @@ class KillswitchNode:
         self._gimbal_rate: Tuple[float, float] = (0.0, 0.0)
         self._last_command_at: Optional[float] = None
         self._last_acted_frame_id: int = -1
+        # True once the actuator has been made safe for the current IDLE. Read
+        # and written only on the tick thread, so it is not a cross-thread
+        # handoff (rule 3). Starts True: the firmware boots de-energised,
+        # disarmed and e-stop latched. See _resafe_if_forced_idle.
+        self._idle_safed: bool = True
+        self._next_safe_attempt_at: float = 0.0
         self._engagement_metrics: Dict[str, Any] = {}
 
     # ---- lifecycle -------------------------------------------------------
@@ -409,6 +415,7 @@ class KillswitchNode:
         while self._running.is_set():
             tick_start = time.monotonic()
             try:
+                self._resafe_if_forced_idle()
                 self._check_liveness()
                 handlers[self._machine.state]()
             except IllegalTransitionError as exc:
@@ -598,10 +605,27 @@ class KillswitchNode:
 
         held = time.monotonic() - self._hold_started_at
         if held >= self._cfg["engagement"]["hold_duration_s"]:
-            self._publish_firing_solution(snapshot, held)
-            self._machine.transition_to(
-                EngagementState.OPERATOR_AUTH, f"held {held:.2f}s within band"
-            )
+            self._open_auth_window(snapshot, held)
+
+    def _open_auth_window(self, snapshot: TrackSnapshot, held: float) -> None:
+        """Empty the C2 inbox, publish the firing solution, enter OPERATOR_AUTH.
+
+        Only a decision made inside this window may count. An auth that arrived
+        after the previous window timed out stayed in the inbox, and this window
+        read it the moment it opened: same target id, unused nonce, no fresh
+        human decision. The drain comes before the firing solution goes out, and
+        the console sends SPACE only once it sees this window, so a genuine
+        decision can never be drained.
+
+        Thread: the tick (main) thread.
+        """
+        dropped = self._c2.drain()
+        if dropped:
+            logger.warning("Discarded %d stale C2 message(s) opening the auth window", dropped)
+        self._publish_firing_solution(snapshot, held)
+        self._machine.transition_to(
+            EngagementState.OPERATOR_AUTH, f"held {held:.2f}s within band"
+        )
 
     def _tick_operator_auth(self) -> None:
         """Await the operator decision. Keep tracking — the target does not wait."""
@@ -794,8 +818,40 @@ class KillswitchNode:
         self._burn_started_at = None
         self._enter_idle(reason)
 
+    def _resafe_if_forced_idle(self) -> None:
+        """Safe the actuator after an IDLE this thread did not enter itself.
+
+        `force_idle()` is the one transition another thread makes: the vision
+        thread calls it on a detector fault. It only moves the state. Nothing on
+        that path touches the actuator, and `_check_liveness` skips IDLE, so a
+        fault mid-burn left the effector on until the firmware's 2.0 s burn
+        ceiling. Only this thread writes to the actuator, so the state change is
+        noticed here and `_enter_idle` does the safing, within one tick.
+
+        A failed attempt leaves `_idle_safed` clear and is retried once per
+        firmware deadman period, which is also the backstop if the link is dead.
+
+        Thread: the tick (main) thread only.
+        """
+        if not self._machine.is_in(EngagementState.IDLE):
+            self._idle_safed = False
+            return
+        if self._idle_safed or time.monotonic() < self._next_safe_attempt_at:
+            return
+        history = self._machine.history()
+        cause = history[-1].reason if history else "unknown"
+        logger.warning("IDLE entered without safing (%s); safing now", cause)
+        self._enter_idle(f"forced idle: safing on tick thread ({cause})")
+        self._audit.write("forced_idle_safed", {"cause": cause, "safed": self._idle_safed})
+
     def _enter_idle(self, reason: str) -> None:
-        """Universal safe harbour. Never raises — every fault path ends here."""
+        """Universal safe harbour. Never raises — every fault path ends here.
+
+        Effector off, disarm, stow. Sets `_idle_safed` only if all three
+        commands went out; on failure `_resafe_if_forced_idle` retries.
+
+        Thread: the tick (main) thread.
+        """
         try:
             if self._actuator is not None:
                 self._actuator.set_effector(False)
@@ -804,10 +860,13 @@ class KillswitchNode:
                     self._cfg["actuator"]["stow_pan_deg"],
                     self._cfg["actuator"]["stow_tilt_deg"],
                 )
+            self._idle_safed = True
         except ActuatorError as exc:
+            self._idle_safed = False
+            self._next_safe_attempt_at = time.monotonic() + DEADMAN_TIMEOUT_MS / 1000.0
             logger.critical(
                 "Could not safe the actuator entering IDLE: %s. Firmware deadman "
-                "will cut the effector within its window.", exc,
+                "will cut the effector within its window; retrying.", exc,
             )
 
         self._hold_started_at = None
