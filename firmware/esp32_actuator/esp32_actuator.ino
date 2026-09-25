@@ -8,21 +8,32 @@
  * It independently enforces the deadman timeout, the burn ceiling, arming,
  * and actuator bounds. It never trusts the host to do any of those.
  *
- * The effector on the bench is an eye-safe LED. Every guardrail here is sized
- * for a hazardous effector on purpose: the architecture claims this brain
+ * The effector on the bench is a KY-008 650 nm laser module — a low-power
+ * stand-in, but a real emitter, not an indicator LED. Every guardrail here is
+ * sized for a hazardous effector on purpose: the architecture claims this brain
  * re-hosts onto a real one, and that claim is only credible if the safety
  * logic was built for it from the start.
  *
- * Board:   ESP32-S3-WROOM-1
+ * NO FIRMWARE CHANGE was needed when the effector moved from an LED to the
+ * laser module. The gate is a plain digitalWrite on the same pin either way;
+ * only what hangs off it changed. Recorded here so the next reader does not go
+ * looking for a driver that does not exist.
+ *
+ * Board:   ESP32-S3-N16R8 (16 MB flash, 8 MB PSRAM)
  * Library: ESP32Servo (Kevin Harrington)
- * Port:    UART bridge (CP2102/CH340) — NOT native USB-CDC. The bridge stays
- *          enumerated across ESP32 resets; native USB re-enumerates and the
- *          host's serial handle dies.
+ * Port:    UART bridge (CH343 on this board; CP2102/CH340 on others) — NOT
+ *          native USB-CDC. The bridge stays enumerated across ESP32 resets;
+ *          native USB re-enumerates and the host's serial handle dies.
+ *
+ * NOT ON THIS BOARD: the camera. Vision runs on the host against a USB webcam.
+ * A DVP camera here would take GPIO 4-18 — including 5, 6 and 7 — and would put
+ * frame DMA on the processor that owns the deadman. See CLAUDE.md.
  *
  * Wiring:
  *   GPIO 5  -> Pan servo signal     (5V + GND from a SEPARATE supply)
  *   GPIO 6  -> Tilt servo signal    (common ground with the ESP32)
- *   GPIO 7  -> Effector gate        (220R -> LED -> GND, 10k pulldown to GND)
+ *   GPIO 7  -> Effector gate        (1k -> 2N2222 base; collector sinks the
+ *                                    KY-008 '-' terminal; 10k pulldown to GND)
  *
  * The 10k pulldown on GPIO 7 is mandatory. Between power-on and the first line
  * of setup(), every ESP32 GPIO is a floating input. A floating gate is an

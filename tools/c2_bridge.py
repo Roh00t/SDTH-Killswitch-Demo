@@ -503,6 +503,35 @@ async def run(args) -> int:
     return exit_code
 
 
+def _run_bridge(coro) -> int:
+    """Run the bridge's event loop, forcing a selector loop on Windows.
+
+    aiomqtt drives paho through ``loop.add_reader()``. Windows has defaulted to
+    ProactorEventLoop since 3.8, and Proactor does not implement add_reader, so
+    the bridge dies with NotImplementedError on the first socket registration.
+    The selector loop implements it.
+
+    Python 3.14 deprecates ``asyncio.set_event_loop_policy`` and the
+    ``*EventLoopPolicy`` classes (removal targeted for 3.16), so prefer
+    ``asyncio.run(loop_factory=...)`` where it exists (3.12+). 3.11 has
+    TaskGroup but not loop_factory, and the bridge needs TaskGroup, so 3.11 is
+    the one version that still takes the policy path.
+
+    Args:
+        coro: The bridge coroutine to run to completion.
+
+    Returns:
+        The coroutine's exit code.
+
+    Thread: called from the process main thread only.
+    """
+    if sys.platform == "win32":
+        if sys.version_info >= (3, 12):
+            return asyncio.run(coro, loop_factory=asyncio.SelectorEventLoop)
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    return asyncio.run(coro)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--broker", default="localhost")
@@ -525,7 +554,7 @@ def main() -> int:
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                         datefmt="%H:%M:%S")
     try:
-        return asyncio.run(run(args))
+        return _run_bridge(run(args))
     except KeyboardInterrupt:
         return 0
 

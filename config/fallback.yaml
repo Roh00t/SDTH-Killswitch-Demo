@@ -71,7 +71,13 @@ engagement:
   track_loss_timeout_s: 1.0  # No target for this long -> back to SCAN.
   scan_timeout_s: 30.0       # No detection for this long -> IDLE.
   auth_timeout_s: 10.0       # No operator decision -> back to TRACK.
-  burn_duration_s: 2.0       # Firmware enforces its own ceiling regardless.
+  # 1.8, NOT 2.0. The firmware's independent ceiling is MAX_BURN_MS = 2000, and
+  # it starts its clock when it parses L1 while the host starts its own clock
+  # after the serial write returns — so at 2.0 the firmware wins every nominal
+  # burn and emits "E06 burn ceiling reached", logging a clean engagement as a
+  # hardware safety trip. 200 ms of margin gives nominal completion back to the
+  # host and keeps the firmware ceiling as a genuine backstop.
+  burn_duration_s: 1.8
 
 scan:
   pan_step_deg: 4.0
@@ -82,11 +88,24 @@ scan:
   boresight_azimuth_deg: 0.0
 
 actuator:
-  # "auto" finds the USB-UART bridge by description. macOS hands out
-  # /dev/cu.usbserial-<n> where <n> changes between plugs, so hardcoding it
-  # guarantees a failure at the worst possible moment. Override with an
-  # explicit path only if two boards are attached.
-  port: "auto"
+  # WINDOWS DEMO PROFILE: pinned to an explicit COM port on purpose.
+  #
+  # "auto" matches the USB-UART bridge by description and is the right default
+  # on macOS, where /dev/cu.usbserial-<n> renumbers between plugs. On the
+  # Windows demo box the trade runs the other way: the COM number is stable
+  # across reboots, and a pinned port removes auto-detect from the critical
+  # path entirely. helper/hardware/actuator.py now matches the CH343 family, so
+  # "auto" works here too — this pin is belt-and-braces, not a workaround.
+  #
+  # CONFIRM THIS NUMBER BEFORE EVERY DEMO. It moves when the board is plugged
+  # into a different physical USB socket:
+  #     python -m tools.serial_probe --list
+  # Use the port whose description names a CH343/CP210x bridge, NOT the one
+  # reading "USB Serial Device" — that is the ESP32-S3's native USB-CDC, which
+  # re-enumerates on every board reset and kills the host's serial handle.
+  #
+  # On macOS/Linux set this back to "auto" or to /dev/cu.usbserial-<n>.
+  port: "COM3"
   baud: 921600
   stow_pan_deg: 90.0
   stow_tilt_deg: 90.0
