@@ -3,7 +3,7 @@
 #   powershell -ExecutionPolicy Bypass -File .\win_firewall_cot.ps1
 #
 # One-liner equivalent (paste into an elevated prompt):
-#   New-NetFirewallRule -DisplayName "TAK CoT UDP In" -Direction Inbound -Protocol UDP -LocalPort 6969 -Action Allow -Profile Domain,Private,Public; New-NetFirewallRule -DisplayName "TAK CoT UDP Out" -Direction Outbound -Protocol UDP -LocalPort 6969 -Action Allow -Profile Domain,Private,Public
+#   New-NetFirewallRule -DisplayName "TAK CoT UDP In" -Direction Inbound -Protocol UDP -LocalPort 6969 -Action Allow -Profile Domain,Private,Public; New-NetFirewallRule -DisplayName "TAK CoT UDP Out" -Direction Outbound -Protocol UDP -RemotePort 6969 -Action Allow -Profile Domain,Private,Public
 
 #Requires -RunAsAdministrator
 $ErrorActionPreference = "Stop"
@@ -21,10 +21,14 @@ New-NetFirewallRule -DisplayName "TAK CoT UDP In" -Direction Inbound `
     -Profile Domain,Private,Public | Out-Null
 Write-Host "[+] Inbound  UDP $Port allowed (Domain, Private, Public)" -ForegroundColor Green
 
+# Outbound is keyed on the REMOTE port. The bridge's CoT socket is never bound,
+# so it sends from a random local port to port 6969 on the group or the phone;
+# a -LocalPort 6969 rule never matched it. Windows allows outbound by default,
+# so this only matters on a machine whose default outbound action is Block.
 New-NetFirewallRule -DisplayName "TAK CoT UDP Out" -Direction Outbound `
-    -Protocol UDP -LocalPort $Port -Action Allow `
+    -Protocol UDP -RemotePort $Port -Action Allow `
     -Profile Domain,Private,Public | Out-Null
-Write-Host "[+] Outbound UDP $Port allowed (Domain, Private, Public)" -ForegroundColor Green
+Write-Host "[+] Outbound UDP to remote port $Port allowed (Domain, Private, Public)" -ForegroundColor Green
 
 # Live dashboard for a phone on the same network (iPhone Safari): the page is
 # served by `python -m http.server 8000` and its feed by the bridge on 8765.

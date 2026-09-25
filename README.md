@@ -377,7 +377,7 @@ by default. If unicast still shows nothing, add a UDP input on port 6969.
 | Marker | Label and remarks |
 |---|---|
 | Node 1 (real) | `KILLSWITCH-01 [<state>]`, remarks `REAL NODE \| STATE … \| TGT …`. Follows the real node: pressing SPACE in the console turns it to `[ENGAGE]`. Reads `[NO LINK]` before the node reports, as soon as its MQTT last-will fires, or after 10 s of silence. |
-| Nodes 2–20 | Remarks `SIMULATED INTERCEPTOR` / `RF-JAMMER` / `SENTRY-UGV` / `LASER` |
+| Nodes 2–20 | Remarks `SIMULATED INTERCEPTOR` / `RF-JAMMER` / `SENTRY-UGV` / `LASER`. After console key `1`/`2`/`3`, nodes 2/3/4 read `[TASKED]` with `SIMULATED <KIND> \| TASKED BY OPERATOR -> <threat>` until that threat resolves |
 | Threats | Red UAV icons, remarks `SIMULATED THREAT \| <range> m \| TTI <s> s` |
 
 The map refreshes at 2 Hz, so a state shorter than half a second (SCAN usually is) may
@@ -450,6 +450,10 @@ source files to anyone on the network; there are no credentials in that folder.
 
 ## Demo Runbook — Windows, 4 terminals
 
+**On stage, use the sheets:** [`docs/STAGE_SHEET.md`](docs/STAGE_SHEET.md) for the
+physical node and [`docs/SCALE_SHEET.md`](docs/SCALE_SHEET.md) for the ATAK and
+dashboard 1:3 demo. This section is the reference behind them.
+
 **Pre-requisite.** Mosquitto runs as a Windows service, so it needs no terminal:
 
 ```powershell
@@ -474,7 +478,9 @@ python -m http.server 8000 -d tools
 python main.py --config config/fallback.yaml
 ```
 
-**Terminal C**, the operator console. It must keep window focus to receive keystrokes.
+**Terminal C**, the operator console. It opens an **Operator Console** window, and keys
+reach that window only while it has focus: click its title bar, not the PowerShell
+window. `1`/`2`/`3` task simulated assets; see the Scale Sheet.
 
 ```bat
 python -m tools.operator_console --config config/fallback.yaml
@@ -484,15 +490,18 @@ python -m tools.operator_console --config config/fallback.yaml
 dashboard, and `--cot-unicast <phone-ip>` for an ATAK phone.
 
 ```bat
-python -m tools.c2_bridge --threat-start-m 420
+python -m tools.c2_bridge --config config/fallback.yaml --threat-start-m 420
 ```
+
+`--config` must name the same file as B and C: the bridge reads the operator token from it
+to check keys `1`-`3`.
 
 **Health checks, in order:**
 
 | Terminal | Proof it is healthy |
 |---|---|
 | B | `C2 connected to localhost:1883 as killswitch-01`, then a resolved serial port |
-| D | all three of `CoT -> …`, `MQTT connected …`, `WebSocket serving on ws://localhost:8765` |
+| D | `CoT -> …`, `Operator tasks: token checked …`, `MQTT connected …`, `WebSocket serving on ws://localhost:8765` |
 | A | header flips `CONNECTING` → `CONNECTED`; gimbal badge reads green **`PHYSICAL GIMBAL`** |
 | A | `DEADMAN AGE` shows a live value under 0.250 s; `FIRMWARE UPTIME` climbs |
 
@@ -508,7 +517,7 @@ run that is a wiring or port fault, not a display quirk.
    (`config/fallback.yaml`). Watch `SCAN → TRACK`.
 4. Hold it steady. The **HOLD PROGRESS** bar fills over 3.0 s, then the state pill turns
    amber and blinks: **`OPERATOR_AUTH`**. You have 10 s.
-5. **Focus Terminal C and press `SPACE` at t ≈ 10.0–10.5 s** (see below for why the
+5. **Click the Operator Console window and press `SPACE` at t ≈ 10.0–10.5 s** (see below for why the
    timing matters). C logs `AUTHORISED TRK-…`; B logs
    `operator AUTHORISED …` and `OPERATOR_AUTH → ENGAGE`; the dashboard `ARMED / EFFECTOR`
    cell reads **`FIRING`**. The laser burns for 1.8 s, then `ENGAGEMENT COMPLETE`.
@@ -537,8 +546,9 @@ Measured on the full stack (`--sim-target`, `fallback.yaml`), one run per press 
 | 11.5 s | 2 | ~0.4 s |
 
 Aim for 10.0–10.5 s. Missed it? Press `D` while the pill reads `OPERATOR_AUTH` between
-11.9 and 13.7 s; the node drops to IDLE and the rejections follow. Press `D` only in
-OPERATOR_AUTH — from any other state it queues.
+11.9 and 13.7 s; the node drops to IDLE and the rejections follow. Press `D` or `SPACE`
+only in OPERATOR_AUTH. One sent at any other time is discarded when the next
+authorisation window opens, so a late press can never fire a later window.
 
 ### Hardware-free fallback: `--sim-target`
 
