@@ -566,6 +566,42 @@ class TestDashboardSocket:
         asyncio.run(serve_client(DropsMidway(), clients))
         assert clients == set()
 
+    def test_neutralised_threat_cannot_freeze_the_dashboard(self):
+        """A frame JSON.parse rejects is dropped, so one Infinity froze the page."""
+        import json
+
+        from tools.c2_bridge import FleetState, dashboard_json
+
+        fleet = FleetState(simulated_nodes=0)
+        fleet.seed_swarm()
+        threat = fleet.threats["THREAT_BETA_01"]
+        threat.status = "NEUTRALIZED"
+        assert threat.to_dict()["tti_s"] == float("inf")    # the source of it
+
+        def reject(token):
+            raise AssertionError(f"{token} is not JSON; the browser drops the frame")
+
+        frame = json.loads(
+            dashboard_json({"threats": [t.to_dict() for t in fleet.threats.values()]}),
+            parse_constant=reject,
+        )
+        tti = {t["uid"]: t["tti_s"] for t in frame["threats"]}
+        assert tti["THREAT_BETA_01"] is None
+        assert isinstance(tti["THREAT_ALPHA_01"], float), "finite values pass through"
+
+    def test_non_finite_node_telemetry_is_nulled_too(self):
+        import json
+
+        from tools.c2_bridge import dashboard_json
+
+        def reject(token):
+            raise AssertionError(f"{token} is not JSON; the browser drops the frame")
+
+        blob = dashboard_json({"node": {"total_lead_ms": float("nan"), "pan_deg": 45.0},
+                               "nested": [[float("-inf")]]})
+        frame = json.loads(blob, parse_constant=reject)
+        assert frame == {"node": {"total_lead_ms": None, "pan_deg": 45.0}, "nested": [[None]]}
+
 
 # ---- which address to tell a phone to open -----------------------------------
 

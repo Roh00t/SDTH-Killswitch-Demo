@@ -652,6 +652,37 @@ async def serve_client(ws: Any, clients: Set[Any]) -> None:
         clients.discard(ws)
 
 
+def dashboard_json(payload: dict) -> str:
+    """Serialise one dashboard frame as strict JSON.
+
+    Python writes float('inf') as `Infinity` and NaN as `NaN`; JavaScript's
+    JSON.parse rejects both, and the dashboard drops any frame it cannot parse.
+    A neutralised threat's time-to-impact is infinite, so every frame from the
+    first neutralisation to the scenario reset was dropped: the display froze
+    while the header still read CONNECTED. Non-finite floats become null, which
+    the dashboard already renders as a dash. This is the only place frames are
+    serialised for the browser, so it covers node telemetry passed through too.
+
+    Args:
+        payload: The frame, as built by the WebSocket pump.
+
+    Returns:
+        JSON text with no non-finite numbers.
+
+    Thread: the bridge's event loop.
+    """
+    def clean(value: Any) -> Any:
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        if isinstance(value, dict):
+            return {k: clean(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [clean(v) for v in value]
+        return value
+
+    return json.dumps(clean(payload), allow_nan=False)
+
+
 async def broadcast(clients: Set[Any], blob: str, timeout_s: float = WS_SEND_TIMEOUT_S) -> None:
     """Send one frame to every dashboard client, dropping any that can't keep up.
 
@@ -723,7 +754,7 @@ async def task_websocket(fleet: FleetState, host: str, port: int) -> None:
                 enc.global_position_int(fleet.base_lat, fleet.base_lon,
                                         fleet.base_hae).to_dict(),
             ]
-            await broadcast(clients, json.dumps(payload))
+            await broadcast(clients, dashboard_json(payload))
 
     async with websockets.serve(lambda ws: serve_client(ws, clients), host, port):
         logger.info("WebSocket serving on ws://%s:%d", host, port)
