@@ -25,13 +25,87 @@ machine, or MQTT input handling are safety-critical.
 
 ## Hardware (as built)
 
-| Role | Part |
+| Role | Part | Bus / pins |
+|---|---|---|
+| Host | Laptop/PC — Windows demo box, macOS dev | — |
+| Edge actuator | ESP32-S3-N16R8 (16 MB flash, 8 MB PSRAM) | CH343 USB-UART @921600, `COM3` |
+| Gimbal | 2× SG90, separate 5 V rail | pan GPIO 5 / tilt GPIO 6 |
+| Effector | KY-008 650 nm laser module, low-side switched | GPIO 7 → 1 kΩ → 2N2222 base, 10 kΩ pulldown |
+| Camera | USB UVC webcam, opened by the HOST via OpenCV | host USB, **not** the ESP32 |
+
+**The camera is on the host, deliberately.** An OV5640 wired to the ESP32-S3 is
+architecturally excluded, not merely unimplemented — see *Why the camera is not on the
+ESP32* below. `helper/vision/frame_source.py` opens a UVC device by index; it has no
+path that reaches a DVP/MIPI sensor.
+
+**Use the CH343 UART port, never the native USB-CDC port.** The S3 exposes both. The
+bridge stays enumerated across ESP32 resets; native USB re-enumerates and takes the
+host's serial handle with it. `_BRIDGE_HINTS` in `helper/hardware/actuator.py` matches
+the CH343 family and deliberately does *not* match `USB Serial Device`.
+
+### Why the camera is not on the ESP32
+
+Three independent blockers, any one of which is disqualifying:
+
+1. **GPIO collision.** ESP32-S3 camera wiring occupies most of GPIO 4–18 for the DVP
+   data bus. GPIO 5, 6 and 7 — pan, tilt and the effector gate — are inside that range
+   on every common S3 camera pinout. The actuator pins would have to move, and the
+   effector pin is the one carrying the 10 kΩ pulldown.
+2. **The link cannot carry the pixels.** The UART bridge runs at 921600 baud ≈ 92 KB/s.
+   One 1280×720 MJPEG frame is 50–100 KB. That is roughly 1 fps, against a control loop
+   designed around ~5 fps of inference. Streaming over WiFi instead adds 100–200 ms to
+   the glass-to-photon budget that `LatencyTracker` exists to minimise.
+3. **It puts vision on the safety processor.** The ESP32 is the safety authority: it
+   owns the 250 ms deadman, the 2000 ms burn ceiling and the 50 Hz servo update. Adding
+   camera DMA and a WiFi stack to that core competes with exactly those deadlines.
+
+Onboard inference is not a third option: YOLO11s does not run on an S3.
+
+### HITL verification status — actuator path COMPLETE
+
+`python -m tools.serial_probe --port COM3` — **13/13 PASS** on the Windows rig.
+
+**Verified:**
+
+| Area | Covered |
 |---|---|
-| Host | Laptop/PC — Linux demo box, macOS dev |
-| Edge actuator | ESP32-S3-WROOM-1, UART bridge @921600 |
-| Gimbal | 2× SG90, pan GPIO 5 / tilt GPIO 6, separate 5 V rail |
-| Camera | HBVCam-3M2111 V22 — 1280×720 MJPG @59.8 fps measured |
-| Effector | Proxy LED, GPIO 7, 10 kΩ pulldown |
+| Link | CH343 bridge on `COM3`, 921600 baud, `ActuatorStatus` frames clean — no drops, no checksum failures |
+| Boot state | Effector de-energised and disarmed at boot (e-stop latched) |
+| Bounds | Out-of-range commands clamped, not wrapped: pan → 180, tilt → 45 |
+| Arming interlock | Fire refused while disarmed; `M1` accepted; effector energises only once armed |
+| De-energise | Effector off on command, confirmed by status frame |
+| Burn ceiling | Firmware cut the burn at `MAX_BURN_MS` without host involvement |
+| Deadman | Heartbeat suppressed 0.6 s → firmware cut the effector **and** dropped arming |
+| Positioning | Absolute angle commands via `serial_probe --interactive` (`a <pan> <tilt>`); centre (90, 90) and tilt 48 deg with no binding or brownout |
+
+**One caveat to preserve, because the repo's own discipline demands it.** The two bounds
+checks read `pan`/`tilt` out of the status frame, and those are *commanded* angles — SG90s
+have no position feedback. `run_checks()` prints this itself: the gimbal section "passes
+even with no servos attached." So 13/13 proves the **firmware clamps correctly**; it does
+not, on its own, prove the servos physically reached pan 180 / tilt 45 without binding.
+That is confirmed by eye during the run, or not at all. Never quote the clamp result as
+measured travel.
+
+**Remaining before the stack is integration-ready:**
+
+- The vision pipeline on the rig — YOLO lock against a real target through the host webcam.
+- The C2 plane end to end: bridge, dashboard, and one clean authorisation through
+  `SPACE` → `ENGAGE` → `ENGAGEMENT COMPLETE`.
+
+> `serial_probe --port COM3` **fires the effector** — now a KY-008 laser, not the LED its
+> console prints still describe. Two ~0.5 s pulses, a 2.6 s burn-ceiling test, then a
+> deadman test. Matte backstop, area behind it clear, every time it is run.
+
+### Pan/tilt bounds are not configurable — on purpose
+
+No YAML file defines them, and none should. The limits live in
+`helper/hardware/protocol.py` (`PAN_MIN_DEG` 0, `PAN_MAX_DEG` 180, `TILT_MIN_DEG` 45,
+`TILT_MAX_DEG` 135) and again in `esp32_actuator.ino`, which is architectural rule 9:
+bounds enforced twice, host-side before transmit and firmware before the PWM write. A
+config knob would be a third authority that the firmware does not honour. What the config
+*does* hold is `scan.pan_step_deg` / `tilt_step_deg` (sweep granularity),
+`scan.boresight_azimuth_deg` (cue geometry) and `actuator.stow_pan_deg` / `stow_tilt_deg`
+(the safe-harbour pose) — none of which are limits.
 
 Weights train on **Google Colab**, land as `.pt`/`.onnx`, and are **gitignored**.
 
@@ -39,7 +113,10 @@ Weights train on **Google Colab**, land as `.pt`/`.onnx`, and are **gitignored**
 
 ## Tech Stack
 
-Python 3.9+ · OpenCV · Ultralytics YOLOv11 + ByteTrack · onnxruntime · `paho-mqtt<2.0`
+Python 3.9+ for the node, **3.11+ for `tools/c2_bridge.py`** (`asyncio.TaskGroup` and
+PEP 654 `except*`). Validated on 3.14 on Windows, where the bridge forces a selector
+event loop — ProactorEventLoop has no `add_reader`, which aiomqtt requires.
+OpenCV · Ultralytics YOLOv11 + ByteTrack · onnxruntime · `paho-mqtt<2.0`
 (2.x changed callback signatures — do not unpin) · pyserial · PyYAML · pytest ·
 C++/Arduino (`ESP32Servo`, LEDC).
 

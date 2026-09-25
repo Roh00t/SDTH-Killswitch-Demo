@@ -32,7 +32,21 @@ class ActuatorError(RuntimeError):
 # USB-UART bridge chips used on ESP32 devkits. Matched against the port
 # description so the node survives the port number changing between plugs —
 # macOS hands out /dev/cu.usbserial-<n> where <n> is not stable.
-_BRIDGE_HINTS = ("CP210", "CH340", "CH910", "FT232", "SLAB", "USB to UART", "USB-Serial")
+#
+# "CH34" covers the whole WCH family (CH340/CH341/CH343/CH344/CH347) rather than
+# one part number: the ESP32-S3-N16R8 boards ship a CH343, whose Windows driver
+# reports "USB-Enhanced-SERIAL CH343 (COMn)" and which the CH340-only list
+# silently failed to match — auto-detect then reported no bridge at all.
+#
+# Deliberately absent: "USB Serial", which is how the ESP32-S3's NATIVE USB-CDC
+# peripheral enumerates on Windows ("USB Serial Device (COMn)"). That port
+# re-enumerates on every ESP32 reset and takes the host's serial handle with it.
+# Not matching it is the feature: auto-detect refusing the native port is
+# cheaper to diagnose than a handle that dies mid-engagement.
+_BRIDGE_HINTS = (
+    "CP210", "CH34", "CH910", "FT232", "SLAB",
+    "USB to UART", "USB-Enhanced-SERIAL", "USB-Serial",
+)
 
 
 def resolve_port(requested: str) -> str:

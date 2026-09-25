@@ -110,11 +110,17 @@ Accounting for beam divergence and 1D Fourier heat conduction, continuous track 
 
 | Role | Part |
 |---|---|
-| Host | Laptop/PC (Linux demo box, macOS dev) |
-| Actuator | ESP32-S3-WROOM-1 |
+| Host | Laptop/PC (Windows demo box, macOS dev) |
+| Actuator | ESP32-S3-N16R8 — 16 MB flash, 8 MB PSRAM, CH343 USB-UART bridge |
 | Gimbal | 2× SG90 micro servo, pan/tilt |
-| Camera | HBVCam-3M2111 V22 — **1280×720 MJPG @ 59.8 fps measured** |
-| Effector | Proxy LED (eye-safe stand-in for a directed-energy effector) |
+| Camera | USB UVC webcam on the **host** — **not** wired to the ESP32 |
+| Effector | KY-008 650 nm laser module, low-side switched through a 2N2222 |
+
+> **The camera is a host device by design.** An OV5640 on the ESP32-S3 collides with the
+> actuator GPIOs, cannot stream over a 921600-baud UART (~1 fps for 720p MJPEG), and puts
+> camera DMA on the processor that owns the 250 ms deadman. See `CLAUDE.md` for the full
+> reasoning. `helper/vision/frame_source.py` opens a UVC device by index and has no path
+> to a DVP/MIPI sensor.
 
 ### Wiring
 
@@ -122,7 +128,7 @@ Accounting for beam divergence and 1D Fourier heat conduction, continuous track 
 |---|---|---|
 | Servo PAN | 5 | Separate 5 V rail |
 | Servo TILT | 6 | Separate 5 V rail |
-| Effector gate | 7 | 220 Ω → LED → GND, **10 kΩ pulldown to GND** |
+| Effector gate | 7 | 1 kΩ → 2N2222 base; collector sinks KY-008 `−`; **10 kΩ pulldown to GND** |
 
 **Two wiring rules that are not optional:**
 
@@ -134,8 +140,15 @@ i.e. on stage.
 `setup()`, every ESP32 GPIO is a floating input. A floating gate is an undefined effector
 state through boot, reflash, brownout and crash. Software cannot fix this. The resistor can.
 
-Use the **UART bridge** port, not native USB-CDC: the bridge stays enumerated across ESP32
-resets, so your serial handle survives.
+Use the **CH343 UART bridge** port, not native USB-CDC: the bridge stays enumerated across
+ESP32 resets, so your serial handle survives. On Windows the bridge shows as
+`USB-Enhanced-SERIAL CH343 (COMn)`; the native port shows as `USB Serial Device (COMn)`.
+Auto-detect matches the first and deliberately refuses the second.
+
+**Power is rail-separated, not galvanically isolated.** The ESP32's 5 V/VIN is left
+unconnected and the servo rail is fed from a second USB-C supply, which keeps servo sag
+off the logic rail. The grounds are still common — through the GND jumper the PWM signals
+need, and through the host chassis. Say *rail separation* when describing it.
 
 ---
 
@@ -242,15 +255,131 @@ and that the CP2102/CH340 driver is installed.
 
 ---
 
-## Demo Runbook
+## Platform Notes (Windows)
 
-1. Start `mosquitto`, then `main.py`, then `operator_console.py`.
-2. Press `C` on the console to inject a radar cue — the node leaves `IDLE`.
-3. Present the target. Watch `SCAN → TRACK → HOLD`, hold bar filling.
-4. At 3.0 s continuous lock the banner turns amber: **AUTHORISATION REQUIRED**.
-5. Press `SPACE`. The LED fires for 2.0 s, metrics are logged, node returns to `IDLE`.
-6. **The fail-safe demo:** during a burn, pull the USB cable. The LED dies within 250 ms
-   because the firmware, not the host, is holding it on.
+**Python 3.11 minimum, 3.14 validated.** `tools/c2_bridge.py` uses `asyncio.TaskGroup`
+and PEP 654 `except*`; below 3.11 it fails as a `SyntaxError` at import, before any log
+line. Everything else in the repo is 3.9-compatible. Check with `python -V`.
+
+**The bridge forces a selector event loop.** Windows has defaulted to
+`ProactorEventLoop` since 3.8, and Proactor does not implement `add_reader`, which
+aiomqtt needs to drive paho — the symptom is `NotImplementedError` on startup.
+`_run_bridge()` handles this. It prefers `asyncio.run(loop_factory=...)` on 3.12+ because
+3.14 deprecates `set_event_loop_policy` and the `*EventLoopPolicy` classes, with removal
+targeted for 3.16; the policy call is kept only for 3.11.
+
+**Serial port.** The ESP32-S3-N16R8 uses a CH343 bridge, reported as
+`USB-Enhanced-SERIAL CH343 (COMn)`. Confirm the number before every demo — it moves when
+the board changes physical socket:
+
+```bat
+python -m tools.serial_probe --list
+```
+
+`config/fallback.yaml` pins `actuator.port: "COM3"`. Auto-detect also matches the CH343
+family now, so `"auto"` works; the pin just removes discovery from the critical path.
+**Never select the port named `USB Serial Device`** — that is the S3's native USB-CDC,
+which re-enumerates on every board reset and kills the host's serial handle mid-run.
+
+### Hardware verification log
+
+**Actuator path — COMPLETE.** `python -m tools.serial_probe --port COM3` passes
+**13/13** on the Windows rig: CH343 bridge at 921600 baud with clean `ActuatorStatus`
+framing, effector de-energised and disarmed at boot, out-of-range commands clamped to
+pan 180 / tilt 45, fire refused while disarmed, arming accepted, effector energised only
+once armed and de-energised on command, firmware burn ceiling cut without host
+involvement, and the 250 ms deadman cutting the effector *and* dropping arming.
+Positioning confirmed separately via `--interactive` (`a <pan> <tilt>`).
+
+> The two bounds checks read **commanded** angles from the status frame — SG90s have no
+> position feedback, and `run_checks()` notes that its gimbal section "passes even with no
+> servos attached." 13/13 proves the firmware clamps correctly. Physical travel to the
+> stops is confirmed by watching the gimbal, not by the pass count. Do not quote the clamp
+> result as measured travel.
+
+**Still outstanding before the stack is integration-ready:**
+
+| Gap | Why it matters |
+|---|---|
+| Vision pipeline untested on the rig | YOLO lock against a real target through the host webcam |
+| C2 plane untested end to end | Bridge, dashboard, and one clean `SPACE` → `ENGAGE` → `ENGAGEMENT COMPLETE` |
+
+> ⚠️ `serial_probe --port COM3` **fires the effector** — a KY-008 laser, not the LED the
+> console prints still describe. Two ~0.5 s pulses, a 2.6 s burn-ceiling test, then a
+> deadman test. Matte backstop, area behind it clear, every time.
+
+**Mosquitto runs as a service.** Confirm before launching anything:
+
+```powershell
+Get-Service -Name mosquitto
+```
+
+If it reads `Stopped`, `Start-Service mosquitto`. Running as a service means you lose the
+`-v` broker log; to watch the wire during debugging, stop the service and run
+`"C:\Program Files\mosquitto\mosquitto.exe" -v` in a terminal instead.
+
+---
+
+## Demo Runbook — Windows, 4 terminals
+
+**Pre-requisite.** Mosquitto runs as a Windows service, so it needs no terminal:
+
+```powershell
+Get-Service -Name mosquitto      # must read Running; else Start-Service mosquitto
+```
+
+Launch order does not matter — the dashboard reconnects with capped backoff — but this
+order gives the cleanest console output. Start **Terminal D last**: see the timing note.
+
+```bat
+:: Terminal A — dashboard   (then open http://localhost:8000/c2_dashboard.html)
+python -m http.server 8000 -d tools
+
+:: Terminal B — engine
+python main.py --config config/fallback.yaml
+
+:: Terminal C — operator console   (must hold window focus to receive keystrokes)
+python -m tools.operator_console --config config/fallback.yaml
+
+:: Terminal D — threat generator
+python -m tools.c2_bridge --threat-start-m 420
+```
+
+**Health checks, in order:**
+
+| Terminal | Proof it is healthy |
+|---|---|
+| B | `C2 connected to localhost:1883 as killswitch-01`, then a resolved serial port |
+| D | all three of `CoT -> …`, `MQTT connected …`, `WebSocket serving on ws://localhost:8765` |
+| A | header flips `CONNECTING` → `CONNECTED`; gimbal badge reads green **`PHYSICAL GIMBAL`** |
+| A | `DEADMAN AGE` shows a live value under 0.250 s; `FIRMWARE UPTIME` climbs |
+
+A cyan **`LOOPBACK SIM`** badge means the engine is running `--mock-actuator`. On a HITL
+run that is a wiring or port fault, not a display quirk.
+
+### Trigger chain rehearsal
+
+1. Four threat tracks appear on the radar with bearings **45, 55, 315, 180**, amber.
+2. At **t ≈ 1.67 s** BETA-01 crosses the 350 m perimeter; its row turns red and the
+   gimbal slews to **pan 45°** to intercept it.
+3. Present the vision target — COCO classes `bird` / `airplane` / `kite` / `frisbee`
+   (`config/fallback.yaml`). Watch `SCAN → TRACK`.
+4. Hold it steady. The **HOLD PROGRESS** bar fills over 3.0 s, then the state pill turns
+   amber and blinks: **`OPERATOR_AUTH`**. You have 10 s.
+5. **Focus Terminal C and press `SPACE`.** C logs `AUTHORISED TRK-…`; B logs
+   `operator AUTHORISED …` and `OPERATOR_AUTH → ENGAGE`; the dashboard `ARMED / EFFECTOR`
+   cell reads **`FIRING`**. The laser burns for 1.8 s, then `ENGAGEMENT COMPLETE`.
+6. **The fail-safe demo:** during a burn, pull the USB cable. The laser dies within
+   250 ms because the firmware, not the host, is holding it on.
+
+**Timing note.** `--threat-start-m 420` only buys one fast cycle. All four threats
+resolve by **t ≈ 13.7 s**, after which the scenario resets to ~1210 m and the next breach
+is ~20 s out. Restart Terminal D immediately before you present.
+
+**At t ≈ 11.71 s, GAMMA-01 (bearing 180°) becomes the priority threat and every cue for
+it is rejected** — it sits outside the 180° pan arc, so `cue_to_gimbal()` returns `None`
+and the node publishes `cue_rejected` without moving. Azimuth is rejected; elevation is
+clamped. That asymmetry is deliberate and is worth narrating rather than hiding.
 
 Every state transition, firing solution and engagement is written to
 `logs/<node>-<timestamp>.jsonl` as well as published over MQTT — so the audit trail
