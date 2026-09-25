@@ -187,12 +187,12 @@ pip install -r requirements.txt
 
 python main.py --config config/bench.yaml           # full node
 python main.py --config config/bench.yaml --mock    # no hardware at all
-python -m tools.camera_probe                        # modes, real fps, BUFFERSIZE
+python -m tools.camera_probe --config config/fallback.yaml  # configured index FOUND?, fps, BUFFERSIZE
 python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 277 tests, zero hardware
+pytest tests/ -q                                    # 285 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -294,7 +294,7 @@ a human reads.
 
 ## Testing
 
-277 tests, all hardware-free, ~2 s.
+285 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
@@ -304,6 +304,7 @@ a human reads.
 | `test_state_machine.py` | Transition table, sweep bounds, cue geometry, prediction, auth-window telemetry, forced-IDLE safing, stale-auth drain |
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
 | `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket, dashboard NO LINK, strict-JSON frames, operator tasking and topic routing |
+| `test_camera_probe.py` | Configured camera index FOUND / NOT FOUND, per-OS no-camera hints |
 | `test_sim_scene.py` | `--sim-target` scene: refuses a real actuator, closes the loop, fresh ids on reset |
 
 **Unit tests are necessary but not sufficient.** Five real bugs were found only by running

@@ -1,12 +1,16 @@
 """Camera bring-up probe — run this FIRST, before tuning anything.
 
-Answers the three questions the latency budget depends on:
-  1. Which device index is the HBVCam?
+Answers the questions the node depends on:
+  1. Which device indices deliver frames, and is the one the config opens
+     (`camera.device_index`) among them?
   2. Does it actually sustain 30 fps, and does MJPG change that?
   3. Is CAP_PROP_BUFFERSIZE honoured on this machine? (Expect 'no' on macOS.)
 
+To tell which index is the external camera, unplug it and run this again: the
+index that disappears is the external one.
+
 Usage:
-    python -m tools.camera_probe
+    python -m tools.camera_probe --config config/fallback.yaml
     python -m tools.camera_probe --index 0 --seconds 5
 """
 from __future__ import annotations
@@ -15,9 +19,10 @@ import argparse
 import platform
 import sys
 import time
-from typing import List, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
+import yaml
 
 TEST_MODES: List[Tuple[int, int]] = [(640, 480), (800, 600), (1280, 720), (1920, 1080)]
 
@@ -44,6 +49,53 @@ def enumerate_devices(max_index: int = 5) -> List[int]:
                 found.append(index)
         cap.release()
     return found
+
+
+def no_camera_hint(system: str) -> List[str]:
+    """What to check when no index delivers a frame, for this OS."""
+    if system == "Windows":
+        return [
+            "  Windows: Settings > Privacy & security > Camera: turn ON both",
+            "  'Camera access' and 'Let desktop apps access your camera'.",
+            "  Close anything holding the camera (Teams, Zoom, the Camera app, browser",
+            "  tabs, a running main.py or vision_probe). Plug it into the laptop, not a hub.",
+        ]
+    if system == "Darwin":
+        return [
+            "  Check the cable and macOS camera permissions",
+            "  (System Settings > Privacy & Security > Camera > Terminal).",
+        ]
+    return ["  Check the cable, that /dev/video* exists, and that you are in the 'video' group."]
+
+
+def load_configured_index(path: str) -> Optional[int]:
+    """`camera.device_index` from a node config, or None if it cannot be read."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"  Could not read {path}: {exc}")
+        return None
+    index = (config.get("camera") or {}).get("device_index")
+    return index if isinstance(index, int) and not isinstance(index, bool) else None
+
+
+def check_configured_index(
+    working: Sequence[int], configured: Optional[int], config_path: str,
+) -> Tuple[bool, str]:
+    """Is the index the node will open one that actually delivers frames?
+
+    Returns:
+        (found, a line to print).
+    """
+    if configured is None:
+        return False, f"Config {config_path}: no usable camera.device_index"
+    if configured in working:
+        return True, f"Config {config_path}: camera.device_index={configured} -> FOUND"
+    return False, (
+        f"Config {config_path}: camera.device_index={configured} -> NOT FOUND. "
+        f"Working indices: {list(working)}. Set camera.device_index to the external one."
+    )
 
 
 def measure_mode(index: int, width: int, height: int, use_mjpg: bool, seconds: float):
@@ -96,20 +148,32 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--index", type=int, default=None, help="Device index (default: probe)")
     parser.add_argument("--seconds", type=float, default=3.0, help="Seconds per mode")
+    parser.add_argument("--config", default="config/bench.yaml",
+                        help="Node config whose camera.device_index is checked")
     args = parser.parse_args()
 
     _, backend_name = backend_for_platform()
     print(f"Platform : {platform.system()}  |  OpenCV {cv2.__version__}  |  backend {backend_name}")
 
     if args.index is None:
+        configured = load_configured_index(args.config)
         print("\nEnumerating devices...")
         devices = enumerate_devices()
         if not devices:
-            print("  No cameras found. Check the cable and macOS camera permissions")
-            print("  (System Settings > Privacy & Security > Camera > Terminal).")
+            print("  No cameras found.")
+            print("\n".join(no_camera_hint(platform.system())))
+            print(check_configured_index(devices, configured, args.config)[1])
             return 1
         print(f"  Working indices: {devices}")
-        index = devices[0]
+        found, line = check_configured_index(devices, configured, args.config)
+        print(line)
+        print("  Which one is the external camera? Unplug it and run this again:")
+        print("  the index that disappears is the external one.")
+        if not found:
+            return 1
+        # Measure the camera the node will open, not whichever index came first
+        # (usually the laptop's built-in one).
+        index = configured
     else:
         index = args.index
 

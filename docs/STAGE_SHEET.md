@@ -24,6 +24,9 @@ low-power proxy for a high-energy laser). The camera is a USB webcam on the lapt
   (OPERATOR_AUTH). SPACE can come at any second after that.
 - [ ] Emergency stop: **pull the ESP32 USB cable**. The firmware cuts the laser within
   250 ms.
+- [ ] The actuator board runs `firmware/esp32_actuator` and nothing else. **Never flash a
+  camera sketch onto it.** Every ESP32-S3 camera pinout uses GPIO 5–7, and on the
+  ESP32-S3-EYE map the camera's HREF line is GPIO 7, the laser gate.
 
 ## T-60: hardware and host
 
@@ -33,6 +36,7 @@ low-power proxy for a high-energy laser). The camera is a USB webcam on the lapt
 | ☐ | Laptop never sleeps | On AC power. `powercfg /change standby-timeout-ac 0`. Power Options → Advanced → USB settings → USB selective suspend → **Disabled** | Suspend would drop the CH343 mid-demo, and the node falls back to IDLE with "serial link lost" |
 | ☐ | Power order | 1. ESP32 USB into the **labelled** port. 2. Then the servo 5 V rail | Servos go to centre (90/90); laser off |
 | ☐ | Serial port | `python -m tools.serial_probe --list` | A CH343 (`USB-Enhanced-SERIAL CH343`) on **COM3**. On any other COM, set `actuator.port` in `config/fallback.yaml` |
+| ☐ | External camera | Close Teams, Zoom, the Camera app and browser tabs. Run `python -m tools.camera_probe --config config/fallback.yaml` | Prints `camera.device_index=1 -> FOUND`. If it says `NOT FOUND` or no cameras, follow the hint it prints. To tell which index is the external camera, unplug it and re-run: the index that disappears is the external one, and that goes in `camera.device_index` |
 | ☐ | Mark the target spot | `python -m tools.serial_probe --port COM3 --interactive`, then `a 45 97`, tape where the camera points, then `a 90 90`, then **`q`** | Tape on the backstop. **Quit** before step B: COM3 is exclusive. Never run `serial_probe` without `--interactive` here, because the full probe **fires the laser** |
 | ☐ | The target is detected | Target on its stand at the tape. `python -m tools.vision_probe --config config/fallback.yaml`, then **Q** to quit (the camera is exclusive) | A box labelled `bird`, `airplane`, `kite` or `frisbee` at **≥ 0.40**. COCO has no drone class, so a drone prop usually fails this |
 | ☐ | Works offline | `dir yolo11s.pt` in the repo folder, then run the whole sheet once **with Wi-Fi off** | The file exists. It only auto-downloads when online |
