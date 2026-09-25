@@ -50,6 +50,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import aiomqtt
+import yaml
 
 from helper.comms.cot import (
     COT_FRIENDLY_GROUND,
@@ -73,7 +74,10 @@ from helper.comms.schemas import (
     TOPIC_NODE_EVENT,
     TOPIC_NODE_TELEMETRY,
     TOPIC_OPERATOR_AUTH,
+    TOPIC_OPERATOR_TASK,
     TOPIC_SLEW_TO_CUE,
+    ValidationError,
+    parse_operator_task,
 )
 
 logger = logging.getLogger("c2_bridge")
@@ -126,6 +130,10 @@ class NodeState:
     last_seen: float = field(default_factory=time.monotonic)
     target_id: Optional[str] = None
     reported: bool = False          # real node only: telemetry seen since start
+    # Simulated nodes only: the threat an operator keypress tasked this asset
+    # onto. A label, never an engagement. See FleetState.task_asset.
+    tasked_threat: Optional[str] = None
+    tasked_callsign: Optional[str] = None
 
     def link_state(self) -> str:
         """The state the map may claim for the real node, or NO LINK.
@@ -146,6 +154,9 @@ class NodeState:
             target = (self.target_id or "-")[:MAX_TARGET_ID_CHARS] if state != "NO LINK" else "-"
             callsign = f"{self.callsign} [{state}]"
             remarks = f"REAL NODE | STATE {state} | TGT {target}"
+        elif self.tasked_threat:
+            callsign = f"{self.callsign} [TASKED]"
+            remarks = f"SIMULATED {self.kind} | TASKED BY OPERATOR -> {self.tasked_callsign}"
         else:
             callsign = self.callsign
             remarks = f"SIMULATED {self.kind}"
@@ -159,6 +170,7 @@ class NodeState:
         return {
             "node_id": self.node_id, "callsign": self.callsign, "kind": self.kind,
             "status": self.status, "is_real": self.is_real,
+            "tasked_threat": self.tasked_threat,
             "lat": self.lat, "lon": self.lon,
             "stale": time.monotonic() - self.last_seen > NODE_LINK_TIMEOUT_S,
         }
@@ -177,6 +189,7 @@ class ThreatTrack:
     status: str = "INBOUND"
     origin_lat: float = DEMO_SITE_LAT   # the base this threat is flying toward
     origin_lon: float = DEMO_SITE_LON
+    tasked_to: Optional[str] = None     # callsign of the simulated asset tasked onto it
 
     @property
     def time_to_impact_s(self) -> float:
@@ -202,7 +215,8 @@ class ThreatTrack:
             uid=self.uid, callsign=self.callsign, cot_type=COT_HOSTILE_AIR_UAV,
             lat=lat, lon=lon, hae=self.alt_m, speed=self.speed_mps,
             course=(self.bearing_deg + 180.0) % 360.0, stale_seconds=4.0,
-            remarks=f"SIMULATED THREAT | {self.distance_m:.0f} m | TTI {tti} s",
+            remarks=f"SIMULATED THREAT | {self.distance_m:.0f} m | TTI {tti} s"
+                    + (f" | TASKED {self.tasked_to}" if self.tasked_to else ""),
         )
 
     def to_dict(self) -> dict:
@@ -213,6 +227,7 @@ class ThreatTrack:
             "range_m": round(self.distance_m, 1), "bearing_deg": round(self.bearing_deg, 1),
             "speed_mps": self.speed_mps, "tti_s": round(self.time_to_impact_s, 1),
             "in_perimeter": self.distance_m <= ENGAGEMENT_PERIMETER_M,
+            "tasked_to": self.tasked_to,
         }
 
 
@@ -282,6 +297,58 @@ class FleetState:
             if t.status == "INBOUND" and t.distance_m <= ENGAGEMENT_PERIMETER_M
         ]
         return min(live, key=lambda t: t.time_to_impact_s) if live else None
+
+    def task_asset(self, asset: int) -> Optional[Tuple[NodeState, ThreatTrack]]:
+        """Task simulated asset `asset` onto the next unassigned threat.
+
+        Node 1 owns the threat the cue path drives the real gimbal onto: the
+        priority threat once one is inside the perimeter, otherwise the
+        lowest-TTI inbound one, which is the next to breach. Each simulated
+        asset takes the highest-priority threat nobody owns yet, so keys 1-3
+        spread three assets over three threats instead of piling onto Node 1's.
+        This only labels the asset. It never changes a threat's status, Node 1,
+        or what the cue path does.
+
+        Args:
+            asset: 1..MAX_TASK_ASSETS; asset n is node KILLSWITCH_NODE_{n+1}.
+
+        Returns:
+            (asset, threat), or None with the reason logged: no such simulated
+            asset, already tasked onto a live threat, or no threat left.
+
+        Thread: the bridge's event loop, holding `self.lock`.
+        """
+        node = self.nodes.get(f"KILLSWITCH_NODE_{asset + 1:02d}")
+        if node is None or node.is_real:
+            logger.warning("Task for asset %d ignored: no such simulated asset", asset)
+            return None
+        inbound = sorted((t for t in self.threats.values() if t.status == "INBOUND"),
+                         key=lambda t: t.time_to_impact_s)
+        if node.tasked_threat and any(t.uid == node.tasked_threat for t in inbound):
+            logger.info("%s is already tasked onto %s", node.callsign, node.tasked_callsign)
+            return None
+        node1_threat = self.priority_threat() or (inbound[0] if inbound else None)
+        owned = {n.tasked_threat for n in self.nodes.values() if n.tasked_threat}
+        if node1_threat is not None:
+            owned.add(node1_threat.uid)
+        target = next((t for t in inbound if t.uid not in owned), None)
+        if target is None:
+            logger.warning("Task for %s ignored: every inbound threat is already covered",
+                           node.callsign)
+            return None
+        node.tasked_threat, node.tasked_callsign = target.uid, target.callsign
+        target.tasked_to = node.callsign
+        self.log("operator_tasked", f"{node.callsign} -> {target.callsign}")
+        logger.info("Operator tasked %s (SIMULATED %s) onto %s",
+                    node.callsign, node.kind, target.callsign)
+        return node, target
+
+    def release_task(self, threat: ThreatTrack) -> None:
+        """Clear any tasking that points at `threat`. Caller holds the lock."""
+        threat.tasked_to = None
+        for node in self.nodes.values():
+            if node.tasked_threat == threat.uid:
+                node.tasked_threat = node.tasked_callsign = None
 
     def node1_view(self) -> Tuple[str, dict]:
         """What the dashboard may claim for the real node: (state, telemetry).
@@ -503,10 +570,12 @@ async def task_swarm(fleet: FleetState) -> None:
                     logger.warning("PERIMETER BREACH %s at %.0fm", t.callsign, t.distance_m)
                 if t.status == "INBOUND" and t.distance_m <= 10.0:
                     t.status = "NEUTRALIZED"
+                    fleet.release_task(t)
                     fleet.log("threat_neutralized", t.callsign)
             if all(t.status != "INBOUND" for t in fleet.threats.values()):
                 fleet.log("scenario_reset", "all vectors resolved")
                 for t in fleet.threats.values():
+                    fleet.release_task(t)
                     t.distance_m += 1200.0
                     t.status = "INBOUND"
         await asyncio.sleep(dt)
@@ -550,12 +619,42 @@ async def task_cot_broadcast(
         await asyncio.sleep(1.0 / COT_BROADCAST_HZ)
 
 
-async def task_mqtt_consume(fleet: FleetState, client: aiomqtt.Client) -> None:
-    """Fold the REAL node's telemetry into FleetState. Validate, never act."""
+async def task_mqtt_consume(
+    fleet: FleetState, client: aiomqtt.Client, task_token: Optional[str] = None,
+) -> None:
+    """Fold the REAL node's telemetry into FleetState, and apply operator tasks.
+
+    Messages are routed by topic before anything is parsed. This loop used to
+    treat every message as node telemetry, which was harmless with two node
+    topics and would let an operator task overwrite Node 1's telemetry once a
+    third topic was subscribed. Validate, never act on the effector: a task
+    only relabels a simulated asset.
+
+    Args:
+        fleet: Shared state.
+        client: Connected MQTT client.
+        task_token: Shared secret operator tasks must carry. None disables the
+            check, which main() warns about at launch.
+
+    Thread: the bridge's event loop.
+    """
     async with client.messages() as messages:
         await client.subscribe(TOPIC_NODE_TELEMETRY)
         await client.subscribe(TOPIC_NODE_EVENT)
+        await client.subscribe(TOPIC_OPERATOR_TASK, qos=1)
         async for message in messages:
+            if message.topic.matches(TOPIC_OPERATOR_TASK):
+                try:
+                    task = parse_operator_task(bytes(message.payload), task_token)
+                except ValidationError as exc:
+                    logger.warning("Rejected operator task: %s", exc)
+                    continue
+                async with fleet.lock:
+                    fleet.task_asset(task.asset)
+                continue
+            if not (message.topic.matches(TOPIC_NODE_TELEMETRY)
+                    or message.topic.matches(TOPIC_NODE_EVENT)):
+                continue
             try:
                 body = json.loads(message.payload.decode("utf-8"))
             except (ValueError, UnicodeDecodeError) as exc:
@@ -789,7 +888,7 @@ async def run(args) -> int:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(task_swarm(fleet))
                 tg.create_task(task_cot_broadcast(fleet, sock, dests, args.stale_pad_s))
-                tg.create_task(task_mqtt_consume(fleet, client))
+                tg.create_task(task_mqtt_consume(fleet, client, args.task_token))
                 tg.create_task(task_cue(fleet, client, not args.no_cue))
                 tg.create_task(task_websocket(fleet, args.ws_host, args.ws_port))
     except* aiomqtt.MqttError as eg:
@@ -833,6 +932,26 @@ def _run_bridge(coro) -> int:
     return asyncio.run(coro)
 
 
+def load_task_token(path: str) -> Optional[str]:
+    """Read `c2.auth_token` from a node config, for checking operator tasks.
+
+    Read at launch so a wrong path fails now, not at the first keypress on
+    stage. Logs where the token came from, or that tasks are unchecked.
+
+    Raises:
+        OSError: The file cannot be read.
+        yaml.YAMLError: The file is not YAML.
+    """
+    with open(path, "r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+    token = (config.get("c2") or {}).get("auth_token")
+    if token:
+        logger.info("Operator tasks: token checked against c2.auth_token in %s", path)
+        return str(token)
+    logger.warning("No c2.auth_token in %s: operator tasks will NOT be token-checked", path)
+    return None
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--broker", default="localhost")
@@ -861,11 +980,19 @@ def main() -> int:
                         "when the TAK device's clock runs ahead and tracks vanish on arrival")
     p.add_argument("--no-cue", action="store_true",
                    help="Do not publish slew_to_cue — observe only, servos stay put")
+    p.add_argument("--config", default="config/bench.yaml",
+                   help="Node config. Only c2.auth_token is read, to check operator "
+                        "tasks. Pass the same file as main.py and the console")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                         datefmt="%H:%M:%S")
+    try:
+        args.task_token = load_task_token(args.config)
+    except (OSError, yaml.YAMLError) as exc:
+        logger.critical("Cannot read --config %s: %s", args.config, exc)
+        return 2
     try:
         return _run_bridge(run(args))
     except KeyboardInterrupt:

@@ -349,6 +349,47 @@ class TestMapBase:
                 parse_base(bad)
 
 
+class _Topic:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    def matches(self, wildcard: str) -> bool:
+        return self.value == wildcard
+
+
+class _Msg:
+    def __init__(self, topic: str, body) -> None:
+        import json
+
+        self.topic = _Topic(topic)
+        self.payload = body if isinstance(body, bytes) else json.dumps(body).encode()
+
+
+class FakeMqtt:
+    """Just enough of aiomqtt.Client for task_mqtt_consume: replays (topic, body)."""
+
+    def __init__(self, items) -> None:
+        self._msgs = [_Msg(topic, body) for topic, body in items]
+        self.subscribed: list = []
+
+    async def subscribe(self, topic: str, qos: int = 0) -> None:
+        self.subscribed.append(topic)
+
+    def messages(self):
+        msgs = self._msgs
+
+        class Ctx:
+            async def __aenter__(self):
+                async def gen():
+                    for m in msgs:
+                        yield m
+                return gen()
+
+            async def __aexit__(self, *exc):
+                return False
+        return Ctx()
+
+
 class TestHonestLabels:
     def _node1(self):
         from tools.c2_bridge import FleetState
@@ -426,44 +467,143 @@ class TestHonestLabels:
         """The node's MQTT last-will must end the link, not refresh it, on the
         map and on the dashboard alike."""
         import asyncio
-        import json
 
+        from helper.comms.schemas import TOPIC_NODE_EVENT, TOPIC_NODE_TELEMETRY
         from tools.c2_bridge import FleetState, task_mqtt_consume
-
-        class Msg:
-            def __init__(self, body):
-                self.payload = json.dumps(body).encode()
-
-        class FakeClient:
-            def __init__(self, bodies):
-                self._msgs = [Msg(b) for b in bodies]
-
-            async def subscribe(self, topic):
-                return None
-
-            def messages(self):
-                msgs = self._msgs
-
-                class Ctx:
-                    async def __aenter__(self):
-                        async def gen():
-                            for m in msgs:
-                                yield m
-                        return gen()
-
-                    async def __aexit__(self, *exc):
-                        return False
-                return Ctx()
 
         fleet = FleetState(simulated_nodes=0)
         live = {"state": "ENGAGE", "target_id": "TRK-BETA_01", "pan_deg": 45.0}
-        asyncio.run(task_mqtt_consume(fleet, FakeClient([live])))
+        asyncio.run(task_mqtt_consume(fleet, FakeMqtt([(TOPIC_NODE_TELEMETRY, live)])))
         assert fleet.nodes["KILLSWITCH_NODE_01"].to_cot().callsign == "KILLSWITCH-01 [ENGAGE]"
         assert fleet.node1_view() == ("ENGAGE", live)
 
-        asyncio.run(task_mqtt_consume(fleet, FakeClient([{"event": "node_lost"}])))
+        asyncio.run(task_mqtt_consume(
+            fleet, FakeMqtt([(TOPIC_NODE_EVENT, {"event": "node_lost"})])))
         assert fleet.nodes["KILLSWITCH_NODE_01"].to_cot().callsign == "KILLSWITCH-01 [NO LINK]"
         assert fleet.node1_view() == ("NO LINK", {})
+
+
+class TestOperatorTasking:
+    """Keys 1-3 label SIMULATED assets. They never engage and never touch Node 1."""
+
+    @staticmethod
+    def _fleet(sim_nodes=3, start_m=420.0):
+        from tools.c2_bridge import FleetState
+
+        fleet = FleetState(simulated_nodes=sim_nodes)
+        fleet.seed_swarm(start_range_m=start_m)
+        return fleet
+
+    def test_three_keys_cover_three_threats_node1_does_not_own(self):
+        fleet = self._fleet()
+        picks = [fleet.task_asset(n)[1].callsign for n in (1, 2, 3)]
+        # BETA is Node 1's: lowest TTI, the next to breach and the one it is cued onto.
+        assert picks == ["SWARM-ALPHA-02", "SWARM-ALPHA-01", "SWARM-GAMMA-01"]
+
+    def test_after_the_breach_node1s_cued_threat_is_still_excluded(self):
+        fleet = self._fleet()
+        fleet.threats["THREAT_BETA_01"].distance_m = 300.0     # inside the perimeter
+        assert fleet.priority_threat().uid == "THREAT_BETA_01"
+        picks = {fleet.task_asset(n)[1].uid for n in (1, 2, 3)}
+        assert "THREAT_BETA_01" not in picks and len(picks) == 3
+
+    def test_tasking_never_touches_node1_the_cue_or_any_threat_status(self):
+        fleet = self._fleet()
+        fleet.threats["THREAT_BETA_01"].distance_m = 300.0
+        node1 = fleet.nodes["KILLSWITCH_NODE_01"]
+        before = (node1.to_cot(), node1.status, node1.target_id, fleet.node1_state,
+                  dict(fleet.node1_telemetry), fleet.priority_threat().uid,
+                  {t.uid: t.status for t in fleet.threats.values()})
+        for n in (1, 2, 3):
+            fleet.task_asset(n)
+        after = (node1.to_cot(), node1.status, node1.target_id, fleet.node1_state,
+                 dict(fleet.node1_telemetry), fleet.priority_threat().uid,
+                 {t.uid: t.status for t in fleet.threats.values()})
+        assert after == before
+        assert node1.tasked_threat is None
+
+    def test_tasked_markers_stay_labelled_simulated_and_never_say_engage(self):
+        fleet = self._fleet()
+        for n in (1, 2, 3):
+            fleet.task_asset(n)
+        asset = fleet.nodes["KILLSWITCH_NODE_02"]
+        ev = asset.to_cot()
+        assert ev.callsign == "KILLSWITCH-02 [TASKED]"
+        assert ev.remarks == f"SIMULATED {asset.kind} | TASKED BY OPERATOR -> SWARM-ALPHA-02"
+        build_cot(ev)                                          # still a valid event
+        for node in fleet.nodes.values():
+            if not node.is_real:
+                cot = node.to_cot()
+                assert cot.remarks.startswith("SIMULATED ")
+                assert "ENGAGE" not in cot.callsign + cot.remarks
+        threat = fleet.threats["THREAT_ALPHA_02"]
+        assert threat.to_dict()["tasked_to"] == "KILLSWITCH-02"
+        assert threat.to_cot().remarks.endswith("| TASKED KILLSWITCH-02")
+
+    def test_repeat_press_missing_asset_and_nothing_left_are_ignored(self):
+        fleet = self._fleet(sim_nodes=4)
+        assert fleet.task_asset(1) is not None
+        assert fleet.task_asset(1) is None, "already tasked onto a live threat"
+        fleet.task_asset(2)
+        fleet.task_asset(3)
+        assert fleet.task_asset(4) is None, "all four threats are covered"
+        assert self._fleet(sim_nodes=2).task_asset(3) is None, "no third simulated asset"
+
+    def test_tasks_clear_when_the_threat_resolves_and_on_reset(self):
+        import asyncio
+
+        from tools.c2_bridge import task_swarm
+
+        fleet = self._fleet()
+        fleet.task_asset(1)                                     # ALPHA-02
+        fleet.threats["THREAT_ALPHA_02"].distance_m = 10.5      # resolves next tick
+
+        async def tick_for(seconds):
+            try:
+                await asyncio.wait_for(task_swarm(fleet), seconds)
+            except asyncio.TimeoutError:
+                pass
+
+        asyncio.run(tick_for(0.3))
+        assert fleet.threats["THREAT_ALPHA_02"].status == "NEUTRALIZED"
+        assert fleet.nodes["KILLSWITCH_NODE_02"].to_cot().callsign == "KILLSWITCH-02"
+        assert fleet.threats["THREAT_ALPHA_02"].tasked_to is None
+
+        fleet.task_asset(2)                                     # ALPHA-01
+        for t in fleet.threats.values():
+            t.distance_m = min(t.distance_m, 10.5)              # everything resolves: reset
+        asyncio.run(tick_for(0.3))
+        assert all(t.status == "INBOUND" for t in fleet.threats.values())
+        assert not any(n.tasked_threat for n in fleet.nodes.values())
+        assert not any(t.tasked_to for t in fleet.threats.values())
+
+    def test_task_topic_is_routed_before_telemetry_and_checked(self):
+        import asyncio
+
+        from helper.comms.schemas import TOPIC_NODE_TELEMETRY, TOPIC_OPERATOR_TASK
+        from tools.c2_bridge import task_mqtt_consume
+
+        fleet = self._fleet()
+        # The real telemetry comes FIRST, so any later message folded in by
+        # mistake would overwrite it and fail the final assertions.
+        client = FakeMqtt([
+            (TOPIC_NODE_TELEMETRY, {"state": "HOLD", "pan_deg": 45.0}),
+            (TOPIC_OPERATOR_TASK, {"asset": 1, "token": "wrong"}),              # bad token
+            (TOPIC_OPERATOR_TASK, {"asset": 2, "token": "tok", "pan_deg": 9.0,
+                                   "state": "ENGAGE"}),                        # smuggled telemetry
+            (TOPIC_OPERATOR_TASK, b"not json"),
+            (TOPIC_OPERATOR_TASK, {"asset": 3, "token": "tok"}),                # the good one
+            ("c2/unrelated", {"state": "ENGAGE", "pan_deg": 1.0}),              # unknown topic
+        ])
+        asyncio.run(task_mqtt_consume(fleet, client, task_token="tok"))
+
+        assert TOPIC_OPERATOR_TASK in client.subscribed
+        assert [n.node_id for n in fleet.nodes.values() if n.tasked_threat] == [
+            "KILLSWITCH_NODE_04"]
+        # Only the real telemetry message reached Node 1; nothing on the task
+        # topic or an unknown topic was folded in.
+        assert fleet.node1_state == "HOLD"
+        assert fleet.node1_telemetry == {"state": "HOLD", "pan_deg": 45.0}
 
 
 # ---- dashboard socket: output-only, and one stalled phone can't freeze it ----

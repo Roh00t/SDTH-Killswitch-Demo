@@ -117,6 +117,16 @@ reads `NO LINK` before the first report, on the MQTT last-will, or after
 Never add a path that sets engagement state on the map by hand; a status a keypress can
 fake is a status a judge cannot trust.
 
+**Operator tasking is the one keypress that changes the map, and it only labels.** Keys
+`1`-`3` in the operator console publish `c2/operator/task` (token-checked, the same
+secret as auth). The bridge routes by topic before parsing anything, and
+`FleetState.task_asset(n)` marks simulated asset n `[TASKED]` with the remark
+`SIMULATED <KIND> | TASKED BY OPERATOR -> <THREAT>`. Each asset takes the
+highest-priority threat nobody owns yet; Node 1 owns the one the cue path is driving it
+onto. A task never touches Node 1, its state, the cue or any threat status, never says
+ENGAGE, and clears when its threat resolves or the scenario resets. The node never
+subscribes to the topic.
+
 ### The dashboard WebSocket is output-only too
 
 `--ws-host 0.0.0.0` puts the dashboard feed on the LAN for a phone. `serve_client` reads
@@ -182,7 +192,7 @@ python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 250 tests, zero hardware
+pytest tests/ -q                                    # 277 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -284,16 +294,16 @@ a human reads.
 
 ## Testing
 
-250 tests, all hardware-free, ~2 s.
+277 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
 | `test_aimpoint.py` | Offset math, clamping, resolution gate, target selection |
-| `test_comms.py` | Payload validation, hostile inputs, token handling |
+| `test_comms.py` | Payload validation, hostile inputs, token handling, operator task parser |
 | `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop |
 | `test_state_machine.py` | Transition table, sweep bounds, cue geometry, prediction, auth-window telemetry, forced-IDLE safing, stale-auth drain |
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
-| `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket, dashboard NO LINK, strict-JSON frames |
+| `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket, dashboard NO LINK, strict-JSON frames, operator tasking and topic routing |
 | `test_sim_scene.py` | `--sim-target` scene: refuses a real actuator, closes the loop, fresh ids on reset |
 
 **Unit tests are necessary but not sufficient.** Five real bugs were found only by running

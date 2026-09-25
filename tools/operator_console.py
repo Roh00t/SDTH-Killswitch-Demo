@@ -11,7 +11,12 @@ Controls:
     SPACE   authorise engagement (only while the node is in OPERATOR_AUTH)
     D       deny engagement
     C       send a test radar cue
+    1/2/3   task SIMULATED asset 1/2/3 onto the next unassigned threat (map
+            label only: it never engages and never addresses the real node)
     Q/ESC   quit the console (the node keeps running)
+
+Keys reach this OpenCV window only while it has focus. Click its title bar,
+not the terminal, before the node asks for authorisation.
 
 Usage:
     python -m tools.operator_console
@@ -37,6 +42,7 @@ from helper.comms.schemas import (
     TOPIC_NODE_EVENT,
     TOPIC_NODE_TELEMETRY,
     TOPIC_OPERATOR_AUTH,
+    TOPIC_OPERATOR_TASK,
     TOPIC_SLEW_TO_CUE,
 )
 from helper.comms.video import TOPIC_NODE_VIDEO, decode_jpeg
@@ -144,6 +150,18 @@ class OperatorConsole:
         self._client.publish(TOPIC_OPERATOR_AUTH, json.dumps(payload), qos=1)
         logger.info("%s %s", "AUTHORISED" if authorise else "DENIED", target_id)
 
+    def task_asset(self, asset: int) -> None:
+        """Task simulated asset `asset` (1..3). The bridge picks the threat.
+
+        Allowed in any node state: it labels a simulated asset on the map and
+        cannot reach the real node or its effector.
+
+        Thread: the console's main (render) thread.
+        """
+        payload = {"asset": asset, "token": self._auth_token or ""}
+        self._client.publish(TOPIC_OPERATOR_TASK, json.dumps(payload), qos=1)
+        logger.info("TASK simulated asset %d", asset)
+
     def send_test_cue(self) -> None:
         """Publish a synthetic radar cue at boresight."""
         payload = {"azimuth": 0.0, "elevation": 0.0,
@@ -234,9 +252,9 @@ class OperatorConsole:
             cv2.putText(canvas, "no engagement without operator authorisation",
                         (44, 503), cv2.FONT_HERSHEY_SIMPLEX, 0.5, _DIM, 1)
 
-        cv2.putText(canvas, "[SPACE] authorise   [D] deny   [C] test cue   [Q] quit",
+        cv2.putText(canvas, "[SPACE] authorise  [D] deny  [1-3] task sim asset  [C] cue  [Q] quit",
                     (20, 560), cv2.FONT_HERSHEY_SIMPLEX, 0.5, _DIM, 1)
-        cv2.putText(canvas, "Proxy effector: LED. Firmware enforces deadman + burn ceiling.",
+        cv2.putText(canvas, "Proxy effector: KY-008 laser. Firmware enforces deadman + burn ceiling.",
                     (20, 588), cv2.FONT_HERSHEY_SIMPLEX, 0.45, _DIM, 1)
         return canvas
 
@@ -260,6 +278,8 @@ class OperatorConsole:
                     self.authorise(False)
                 elif key == ord("c"):
                     self.send_test_cue()
+                elif key in (ord("1"), ord("2"), ord("3")):
+                    self.task_asset(key - ord("0"))
         finally:
             cv2.destroyAllWindows()
             self._client.loop_stop()

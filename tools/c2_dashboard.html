@@ -375,7 +375,7 @@ function renderThreats(){
       <td class="num">${num(t.range_m,0)} m</td>
       <td class="num">${num(t.speed_mps,0)} m/s</td>
       <td class="num">${gone ? "—" : num(t.tti_s,1)+" s"}</td>
-      <td>${esc(t.status || "?")}</td></tr>`;
+      <td>${esc(t.status || "?")}${t.tasked_to ? " · TASKED " + esc(t.tasked_to) : ""}</td></tr>`;
   }).join("");
 }
 function esc(s){ return String(s).replace(/[<>&"]/g, c =>

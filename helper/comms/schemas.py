@@ -25,6 +25,12 @@ TOPIC_SLEW_TO_CUE: str = "c2/radar/slew_to_cue"
 TOPIC_OPERATOR_AUTH: str = "c2/operator/auth"
 TOPIC_NODE_TELEMETRY: str = "c2/node/telemetry"
 TOPIC_NODE_EVENT: str = "c2/node/event"
+# Operator tasking of SIMULATED fleet assets. Consumed by the bridge only; the
+# node never subscribes, so nothing on this topic can reach the effector.
+TOPIC_OPERATOR_TASK: str = "c2/operator/task"
+
+# Keys 1..N on the operator console. Three simulated assets: the 1:3 story.
+MAX_TASK_ASSETS: int = 3
 
 
 class ValidationError(ValueError):
@@ -53,6 +59,18 @@ class OperatorAuth:
     target_id: str
     token: str
     nonce: str
+
+
+@dataclass(frozen=True)
+class OperatorTask:
+    """A validated operator tasking of simulated asset `asset` (1..MAX_TASK_ASSETS).
+
+    It labels a SIMULATED asset on the map as tasked by a human. It never
+    engages anything and never addresses the real node.
+    """
+
+    asset: int
+    token: str
 
 
 def _decode(payload: bytes) -> Dict[str, Any]:
@@ -173,3 +191,36 @@ def parse_operator_auth(payload: bytes, expected_token: Optional[str] = None) ->
         token=obj["token"],
         nonce=obj["nonce"],
     )
+
+
+def parse_operator_task(payload: bytes, expected_token: Optional[str] = None) -> OperatorTask:
+    """Validate an operator tasking message.
+
+    Args:
+        payload: Raw MQTT payload bytes.
+        expected_token: Shared secret, the same one operator auth uses. When
+            provided, a mismatch is rejected.
+
+    Returns:
+        A validated OperatorTask.
+
+    Raises:
+        ValidationError: On schema failure, an asset outside 1..MAX_TASK_ASSETS,
+            or a token mismatch.
+    """
+    obj = _decode(payload)
+    _require_keys(obj, {"asset", "token"}, "operator_task")
+
+    asset = obj["asset"]
+    # bool is an int in Python; {"asset": true} must not mean asset 1.
+    if isinstance(asset, bool) or not isinstance(asset, int):
+        raise ValidationError(f"asset must be an integer, got {type(asset).__name__}")
+    if not 1 <= asset <= MAX_TASK_ASSETS:
+        raise ValidationError(f"asset={asset} outside 1..{MAX_TASK_ASSETS}")
+    token = obj["token"]
+    if not isinstance(token, str) or not token or len(token) > 256:
+        raise ValidationError("token must be a non-empty string of at most 256 chars")
+    if expected_token is not None and token != expected_token:
+        raise ValidationError("token mismatch")
+
+    return OperatorTask(asset=asset, token=token)

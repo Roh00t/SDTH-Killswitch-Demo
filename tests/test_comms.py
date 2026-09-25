@@ -6,10 +6,12 @@ import json
 import pytest
 
 from helper.comms.schemas import (
+    MAX_PAYLOAD_BYTES,
     TOPIC_OPERATOR_AUTH,
     TOPIC_SLEW_TO_CUE,
     ValidationError,
     parse_operator_auth,
+    parse_operator_task,
     parse_slew_to_cue,
 )
 
@@ -22,6 +24,12 @@ def cue(**overrides) -> bytes:
 
 def auth(**overrides) -> bytes:
     body = {"auth": True, "target_id": "TRK-0042", "token": "s3cret", "nonce": "n1"}
+    body.update(overrides)
+    return json.dumps(body).encode()
+
+
+def task(**overrides) -> bytes:
+    body = {"asset": 1, "token": "s3cret"}
     body.update(overrides)
     return json.dumps(body).encode()
 
@@ -149,3 +157,47 @@ class TestMockC2Validation:
         assert client.poll() is not None
         assert client.poll() is None
         assert len(client.rejected) == 2
+
+
+class TestOperatorTask:
+    """The one operator input the bridge consumes. Hostile until proven otherwise."""
+
+    @pytest.mark.parametrize("asset", [1, 2, 3])
+    def test_valid_task_parses(self, asset):
+        parsed = parse_operator_task(task(asset=asset), "s3cret")
+        assert (parsed.asset, parsed.token) == (asset, "s3cret")
+
+    @pytest.mark.parametrize("asset", [0, 4, -1, 99])
+    def test_asset_out_of_range_rejected(self, asset):
+        with pytest.raises(ValidationError, match="outside"):
+            parse_operator_task(task(asset=asset))
+
+    @pytest.mark.parametrize("asset", [True, 1.0, "1", None, [1]])
+    def test_asset_must_be_a_real_integer(self, asset):
+        # {"asset": true} must not mean asset 1.
+        with pytest.raises(ValidationError, match="integer"):
+            parse_operator_task(task(asset=asset))
+
+    def test_token_mismatch_rejected(self):
+        with pytest.raises(ValidationError, match="token mismatch"):
+            parse_operator_task(task(token="wrong"), "s3cret")
+
+    @pytest.mark.parametrize("token", ["", 7, None, "x" * 257])
+    def test_bad_token_shape_rejected(self, token):
+        with pytest.raises(ValidationError, match="token"):
+            parse_operator_task(task(token=token))
+
+    def test_unknown_fields_rejected(self):
+        # A task can never smuggle node state or telemetry into the bridge.
+        with pytest.raises(ValidationError, match="unknown fields"):
+            parse_operator_task(task(state="ENGAGE", pan_deg=45.0))
+
+    def test_missing_token_rejected(self):
+        with pytest.raises(ValidationError, match="missing"):
+            parse_operator_task(json.dumps({"asset": 1}).encode())
+
+    def test_oversized_and_non_object_payloads_rejected(self):
+        with pytest.raises(ValidationError, match="cap"):
+            parse_operator_task(b"x" * (MAX_PAYLOAD_BYTES + 1))
+        with pytest.raises(ValidationError, match="JSON object"):
+            parse_operator_task(b"[1, 2, 3]")
