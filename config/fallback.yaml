@@ -71,7 +71,7 @@ engagement:
   track_loss_timeout_s: 1.0  # No target for this long -> back to SCAN.
   scan_timeout_s: 30.0       # No detection for this long -> IDLE.
   auth_timeout_s: 10.0       # No operator decision -> back to TRACK.
-  burn_duration_s: 2.0       # Firmware enforces its own ceiling regardless.
+  burn_duration_s: 1.8       # Firmware enforces its own ceiling regardless.
 
 scan:
   pan_step_deg: 4.0
