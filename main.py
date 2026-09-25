@@ -40,7 +40,12 @@ from helper.state.control import ControlGains, compute_correction
 from helper.state.sweep import SweepController, cue_to_gimbal
 from helper.vision.aimpoint import AimpointSolver, error_magnitude, select_priority_target
 from helper.vision.detector import Detector, DetectorError, ScriptedDetector, UltralyticsDetector
-from helper.vision.frame_source import FrameSource, MockFrameSource, UsbCameraSource
+from helper.vision.frame_source import (
+    FrameSource,
+    HttpStreamSource,
+    MockFrameSource,
+    UsbCameraSource,
+)
 from helper.vision.predictor import AimpointPredictor, LatencyTracker
 
 logger = logging.getLogger("killswitch")
@@ -252,6 +257,13 @@ class KillswitchNode:
             self._camera = MockFrameSource(cam["width"], cam["height"], fps=SIM_FRAME_FPS)
         elif self._mock_camera:
             self._camera = MockFrameSource(cam["width"], cam["height"])
+        elif cam.get("stream_url"):
+            # The ESP32-S3's own camera over Wi-Fi. Same newest-frame-wins reader.
+            self._camera = HttpStreamSource(
+                cam["stream_url"],
+                flip_horizontal=bool(cam.get("flip_horizontal", False)),
+                flip_vertical=bool(cam.get("flip_vertical", False)),
+            )
         else:
             self._camera = UsbCameraSource(
                 device_index=cam["device_index"],
@@ -517,7 +529,8 @@ class KillswitchNode:
             self._enter_idle("C2 link lost")
         elif isinstance(self._actuator, SerialActuator) and not self._actuator.is_healthy:
             self._enter_idle("serial link lost")
-        elif isinstance(self._camera, UsbCameraSource) and not self._camera.is_healthy:
+        elif (isinstance(self._camera, (UsbCameraSource, HttpStreamSource))
+              and not self._camera.is_healthy):
             self._enter_idle("camera lost")
 
     # ---- state handlers --------------------------------------------------

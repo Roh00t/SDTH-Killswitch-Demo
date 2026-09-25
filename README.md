@@ -113,22 +113,23 @@ Accounting for beam divergence and 1D Fourier heat conduction, continuous track 
 | Host | Laptop/PC (Windows demo box, macOS dev) |
 | Actuator | ESP32-S3-N16R8 — 16 MB flash, 8 MB PSRAM, CH343 USB-UART bridge |
 | Gimbal | 2× SG90 micro servo, pan/tilt |
-| Camera | USB UVC webcam on the **host** — **not** wired to the ESP32 |
+| Camera | OV5640 on the ESP32-S3's camera connector, streamed to the host over Wi-Fi (`camera.stream_url`). A USB webcam still works via `camera.device_index` |
 | Effector | KY-008 650 nm laser module, low-side switched through a 2N2222 |
 
-> **The camera is a host device by design.** An OV5640 on the ESP32-S3 collides with the
-> actuator GPIOs, cannot stream over a 921600-baud UART (~1 fps for 720p MJPEG), and puts
-> camera DMA on the processor that owns the 250 ms deadman. See `CLAUDE.md` for the full
-> reasoning. `helper/vision/frame_source.py` opens a UVC device by index and has no path
-> to a DVP/MIPI sensor.
+> **The OV5640 streams from the ESP32-S3 over Wi-Fi; vision still runs on the host.**
+> Its connector owns GPIO 4–18, so the actuator moved to 14/21/1 and the firmware refuses
+> to build if they ever overlap. Camera and Wi-Fi run on core 0, the safety loop on core 1.
+> The costs are real: ~100–200 ms of Wi-Fi delay the lead predictor does not measure,
+> one stream viewer at a time, and 2.4 GHz only. See `CLAUDE.md`.
 
 ### Wiring
 
 | Function | GPIO | Notes |
 |---|---|---|
-| Servo PAN | 5 | Separate 5 V rail |
-| Servo TILT | 6 | Separate 5 V rail |
-| Effector gate | 7 | 1 kΩ → 2N2222 base; collector sinks KY-008 `−`; **10 kΩ pulldown to GND** |
+| Servo PAN | 14 | Separate 5 V rail |
+| Servo TILT | 21 | Separate 5 V rail |
+| Effector gate | 1 | 1 kΩ → 2N2222 base; collector sinks KY-008 `−`; **10 kΩ pulldown to GND** |
+| Camera | 4–13, 15–18 | The board's camera connector (ESP32-S3-EYE layout). Nothing else may use these |
 
 **Two wiring rules that are not optional:**
 
@@ -136,7 +137,7 @@ Accounting for beam divergence and 1D Fourier heat conduction, continuous track 
 ~700 mA each. On a shared rail they brown out the board under load — i.e. during tracking,
 i.e. on stage.
 
-**The 10 kΩ pulldown on GPIO 7 is mandatory.** Between power-on and the first line of
+**The 10 kΩ pulldown on GPIO 1 is mandatory.** Between power-on and the first line of
 `setup()`, every ESP32 GPIO is a floating input. A floating gate is an undefined effector
 state through boot, reflash, brownout and crash. Software cannot fix this. The resistor can.
 
@@ -166,8 +167,20 @@ is honoured on your machine:
 python -m tools.camera_probe
 ```
 
-**2. Flash and verify the actuator.** Open `firmware/esp32_actuator/esp32_actuator.ino`
-(board: *ESP32S3 Dev Module*, library: *ESP32Servo*), flash, then:
+**2. Flash and verify the actuator.** Copy `firmware/esp32_actuator/wifi_secrets.example.h`
+to `wifi_secrets.h` in the same folder and put your Wi-Fi name and password in it (it is
+gitignored). Open `firmware/esp32_actuator/esp32_actuator.ino` with library *ESP32Servo*
+and these **Tools** settings:
+
+| Setting | Value |
+|---|---|
+| Board | ESP32S3 Dev Module |
+| USB CDC On Boot | Disabled (so the firmware talks on the CH343, COM3) |
+| PSRAM | **OPI PSRAM** (the camera's frame buffers live there) |
+| Flash Size | 16MB (128Mb) |
+| Partition Scheme | 16M Flash (3MB APP/9.9MB FATFS) |
+
+Flash, then:
 
 ```bash
 python -m tools.serial_probe --list
@@ -226,7 +239,7 @@ python -m tools.operator_console
 **Tests:**
 
 ```bash
-pytest tests/ -q        # 285 tests, zero hardware, ~2s
+pytest tests/ -q        # 297 tests, zero hardware, ~7s
 ```
 
 ---

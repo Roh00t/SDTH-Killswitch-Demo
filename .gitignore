@@ -109,3 +109,6 @@ firmware/**/.vscode/
 sdkconfig
 sdkconfig.old
 managed_components/
+
+# ESP32 Wi-Fi credentials (copy wifi_secrets.example.h)
+firmware/esp32_actuator/wifi_secrets.h

@@ -1,7 +1,12 @@
 """camera_probe's answers to 'is the configured camera reachable?'. No camera needed."""
 from __future__ import annotations
 
-from tools.camera_probe import check_configured_index, load_configured_index, no_camera_hint
+from tools.camera_probe import (
+    check_configured_index,
+    load_configured_index,
+    load_stream_url,
+    no_camera_hint,
+)
 
 
 class TestConfiguredIndex:
@@ -45,3 +50,14 @@ class TestHints:
     def test_macos_and_linux_hints(self):
         assert "Privacy & Security" in "\n".join(no_camera_hint("Darwin"))
         assert "/dev/video" in "\n".join(no_camera_hint("Linux"))
+
+
+class TestLoadStreamUrl:
+    def test_set_unset_and_blank(self, tmp_path):
+        (tmp_path / "a.yaml").write_text('camera:\n  stream_url: "http://10.0.0.9/stream"\n')
+        (tmp_path / "b.yaml").write_text("camera:\n  stream_url: null\n")
+        (tmp_path / "c.yaml").write_text('camera:\n  stream_url: "  "\n')
+        assert load_stream_url(str(tmp_path / "a.yaml")) == "http://10.0.0.9/stream"
+        assert load_stream_url(str(tmp_path / "b.yaml")) is None
+        assert load_stream_url(str(tmp_path / "c.yaml")) is None
+        assert load_stream_url(str(tmp_path / "missing.yaml")) is None

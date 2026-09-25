@@ -152,13 +152,13 @@ def servo_sweep(port: str) -> int:
             s = actuator.last_status()
             print(f"commanded pan={s.pan:5.1f} tilt={s.tilt:5.1f}" if s else "no status")
 
-        print("PAN axis (GPIO 5) — should swing left/right")
+        print("PAN axis (GPIO 14) — should swing left/right")
         move("centre", 90.0, 90.0)
         move("pan hard left  (0 deg)", 5.0, 90.0, 2.5)
         move("pan hard right (180 deg)", 175.0, 90.0, 3.0)
         move("pan centre", 90.0, 90.0, 2.5)
 
-        print("\nTILT axis (GPIO 6) — should tip up/down")
+        print("\nTILT axis (GPIO 21) — should tip up/down")
         move("tilt down (45 deg)", 90.0, 48.0, 2.5)
         move("tilt up   (135 deg)", 90.0, 132.0, 3.0)
         move("tilt centre", 90.0, 90.0, 2.5)
@@ -188,7 +188,7 @@ NOTHING moved but you hear buzzing or feel the horn straining
 
 ONE axis moved, the other did not
     That axis alone is at fault: signal wire, the servo itself, or the pin.
-    - Pan signal (orange/yellow) -> GPIO 5, Tilt -> GPIO 6.
+    - Pan signal (orange/yellow) -> GPIO 14, Tilt -> GPIO 21.
     - Swap the two signal wires. If the fault follows the wire it is wiring;
       if it stays on the same axis it is that servo or that GPIO.
 

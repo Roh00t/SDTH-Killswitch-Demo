@@ -14,7 +14,7 @@ import platform
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -235,6 +235,197 @@ class UsbCameraSource(FrameSource):
     @property
     def is_healthy(self) -> bool:
         """False once the device has been declared disconnected."""
+        return self._running.is_set()
+
+
+def _open_http_capture(url: str, open_timeout_s: float, read_timeout_s: float) -> cv2.VideoCapture:
+    """Open an MJPEG-over-HTTP stream with FFmpeg, with bounded open and read waits.
+
+    Without the timeouts FFmpeg waits about 30 s on a dead link, so a Wi-Fi drop
+    would freeze the reader instead of failing fast. Older OpenCV builds without
+    the params overload fall back to the defaults.
+    """
+    params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(open_timeout_s * 1000),
+              cv2.CAP_PROP_READ_TIMEOUT_MSEC, int(read_timeout_s * 1000)]
+    try:
+        return cv2.VideoCapture(url, cv2.CAP_FFMPEG, params)
+    except (TypeError, cv2.error):
+        return cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+
+
+class HttpStreamSource(FrameSource):
+    """MJPEG-over-HTTP camera, e.g. the ESP32-S3's `/stream`, newest frame wins.
+
+    FFmpeg buffers network frames, and CAP_PROP_BUFFERSIZE does not bound that
+    for HTTP, so reading "a frame" when the model is ready can return one that is
+    seconds old. The load-bearing mechanism is the same as UsbCameraSource: a
+    daemon thread reads the stream as fast as it arrives and keeps only the
+    newest frame (CLAUDE.md rule 7).
+
+    A Wi-Fi drop ends the stream. The reader reopens it and only declares the
+    source unhealthy after `reconnect_window_s` without a frame, at which point
+    the node's liveness check drops to IDLE.
+
+    Latency note: frames are timestamped when the host receives them, so the
+    ESP32's JPEG encode and the Wi-Fi hop (~100-200 ms) are not in the measured
+    compute latency. The lead predictor under-leads by that much.
+
+    Thread-safety: ``read()`` is safe from any thread. ``start()``/``stop()``
+    should be called from the owning thread only.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        open_timeout_s: float = 5.0,
+        read_timeout_s: float = 2.0,
+        reconnect_window_s: float = 3.0,
+        flip_horizontal: bool = False,
+        flip_vertical: bool = False,
+        capture_factory: Optional[Callable[[str], "cv2.VideoCapture"]] = None,
+    ) -> None:
+        """Configure the stream.
+
+        Args:
+            url: Stream URL, e.g. ``http://192.168.43.50/stream``.
+            open_timeout_s: Bound on connecting.
+            read_timeout_s: Bound on waiting for one frame.
+            reconnect_window_s: How long without a frame, reconnecting, before
+                the source reports unhealthy.
+            flip_horizontal: Mirror left-right. Set it when the gimbal turns
+                AWAY from a target on the pan axis: the control law assumes
+                image x grows the way pan grows, and flipping the image is the
+                one-line fix for a camera mounted the other way round.
+            flip_vertical: The same for tilt.
+            capture_factory: Opens a capture for a URL. Tests inject a fake;
+                the default is FFmpeg with the two timeouts above.
+        """
+        self._url = url
+        self._reconnect_window_s = reconnect_window_s
+        # cv2.flip codes: 1 horizontal, 0 vertical, -1 both; None = no flip.
+        self._flip_code: Optional[int] = (
+            -1 if flip_horizontal and flip_vertical
+            else 1 if flip_horizontal
+            else 0 if flip_vertical
+            else None
+        )
+        self._open: Callable[[str], "cv2.VideoCapture"] = capture_factory or (
+            lambda u: _open_http_capture(u, open_timeout_s, read_timeout_s)
+        )
+        self._cap: Optional["cv2.VideoCapture"] = None
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._running = threading.Event()
+        self._latest: Optional[np.ndarray] = None
+        self._frame_id: int = 0
+        self._actual_size: Tuple[int, int] = (0, 0)
+        self._reconnects: int = 0
+
+    def start(self) -> None:
+        """Connect, read one frame to learn the size, start the reader thread.
+
+        Raises:
+            RuntimeError: If the stream cannot be opened or yields no frame.
+        """
+        if self._running.is_set():
+            return
+        cap = self._safe_open()
+        ok, probe = (cap.read() if cap is not None and cap.isOpened() else (False, None))
+        if not ok or probe is None:
+            if cap is not None:
+                cap.release()
+            raise RuntimeError(
+                f"No frames from camera stream {self._url}. Open it in a browser on "
+                f"this laptop; if that fails too, the ESP32 is not on this network. "
+                f"Run 'python -m tools.camera_probe --config <your config>'."
+            )
+        self._actual_size = (probe.shape[1], probe.shape[0])
+        probe = self._oriented(probe)
+        logger.info("Camera stream %s open at %dx%d%s", self._url, *self._actual_size,
+                    "" if self._flip_code is None else f", flip code {self._flip_code}")
+        self._cap = cap
+        with self._lock:
+            self._latest = probe
+            self._frame_id = 1
+        self._running.set()
+        self._thread = threading.Thread(
+            target=self._reader_loop, name="stream-grabber", daemon=True
+        )
+        self._thread.start()
+
+    def _reader_loop(self) -> None:
+        """Read continuously, keep only the newest frame, reconnect on loss.
+
+        Runs on the grabber thread.
+        """
+        last_frame_at = time.monotonic()
+        while self._running.is_set():
+            cap = self._cap
+            ok, frame = cap.read() if cap is not None else (False, None)
+            if ok and frame is not None:
+                last_frame_at = time.monotonic()
+                frame = self._oriented(frame)
+                with self._lock:
+                    self._latest = frame
+                    self._frame_id += 1
+                continue
+
+            if time.monotonic() - last_frame_at > self._reconnect_window_s:
+                logger.error(
+                    "Camera stream %s gave no frame for %.1fs; treating as disconnected",
+                    self._url, self._reconnect_window_s,
+                )
+                self._running.clear()
+                break
+            if cap is not None:
+                cap.release()
+            time.sleep(0.2)
+            self._reconnects += 1
+            logger.warning("Camera stream dropped; reconnecting (%d)", self._reconnects)
+            self._cap = self._safe_open()
+
+    def _safe_open(self) -> Optional["cv2.VideoCapture"]:
+        """Open the stream; None instead of an exception.
+
+        An exception here would kill the reader thread while `is_healthy` still
+        read True, freezing the node on its last frame instead of dropping it
+        to IDLE. None goes through the normal no-frame path and times out.
+        """
+        try:
+            return self._open(self._url)
+        except (cv2.error, OSError, ValueError) as exc:
+            logger.warning("Opening camera stream %s failed: %s", self._url, exc)
+            return None
+
+    def _oriented(self, frame: np.ndarray) -> np.ndarray:
+        return frame if self._flip_code is None else cv2.flip(frame, self._flip_code)
+
+    def read(self) -> Tuple[Optional[np.ndarray], int]:
+        """Return the newest frame and its id. Never blocks on the network."""
+        with self._lock:
+            return (self._latest, self._frame_id)
+
+    def stop(self) -> None:
+        """Stop the reader thread and close the stream."""
+        self._running.clear()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3.0)
+            if thread.is_alive():
+                logger.warning("Stream grabber did not exit within 3s")
+        self._thread = None
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+        logger.info("Camera stream %s closed", self._url)
+
+    @property
+    def frame_size(self) -> Tuple[int, int]:
+        return self._actual_size
+
+    @property
+    def is_healthy(self) -> bool:
+        """False once the stream has been declared disconnected."""
         return self._running.is_set()
 
 

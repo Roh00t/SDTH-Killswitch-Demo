@@ -58,7 +58,7 @@ If firmware behaviour changes, the mock changes in the same commit.
 
 ### Hardware layer
 
-- `[HARD]` **10 kΩ pulldown from GPIO 7 to GND.** Between power-on and the first line of
+- `[HARD]` **10 kΩ pulldown from the effector gate (GPIO 1) to GND.** Between power-on and the first line of
   `setup()`, every ESP32 GPIO is a floating input. A floating gate is an undefined
   effector state during boot, reflash, brownout and crash. Software cannot fix this.
 - `[HARD]` Hazardous effectors drive through a MOSFET, never GPIO directly. (An LED at

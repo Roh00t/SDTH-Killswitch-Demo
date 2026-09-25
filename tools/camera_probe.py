@@ -80,6 +80,52 @@ def load_configured_index(path: str) -> Optional[int]:
     return index if isinstance(index, int) and not isinstance(index, bool) else None
 
 
+def load_stream_url(path: str) -> Optional[str]:
+    """`camera.stream_url` from a node config, or None when unset or unreadable."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    url = (config.get("camera") or {}).get("stream_url")
+    return url if isinstance(url, str) and url.strip() else None
+
+
+STREAM_HINTS = [
+    "  Open the URL in a browser on this laptop. If that shows nothing too:",
+    "  - The ESP32 prints its address on COM3 after boot: run",
+    "    'python -m tools.serial_probe --port COM3 --interactive' and read the",
+    "    'Firmware: CAM http://.../stream' line (then q, before starting main.py).",
+    "  - Laptop and ESP32 must be on the same network, and the ESP32-S3 is 2.4 GHz",
+    "    only (iPhone hotspot: turn on Maximise Compatibility).",
+    "  - Only ONE viewer at a time: close any browser tab showing the stream.",
+]
+
+
+def probe_stream(url: str, seconds: float = 3.0) -> Tuple[bool, str]:
+    """Open the Wi-Fi camera stream, count frames for `seconds`, report.
+
+    Returns:
+        (found, a line to print).
+    """
+    from helper.vision.frame_source import HttpStreamSource
+
+    src = HttpStreamSource(url, reconnect_window_s=seconds)
+    try:
+        src.start()
+    except RuntimeError:
+        return False, f"camera.stream_url={url} -> NOT FOUND (no frames)"
+    try:
+        _, first = src.read()
+        time.sleep(seconds)
+        _, last = src.read()
+        width, height = src.frame_size
+    finally:
+        src.stop()
+    return True, (f"camera.stream_url={url} -> FOUND "
+                  f"({width}x{height}, {(last - first) / seconds:.1f} fps)")
+
+
 def check_configured_index(
     working: Sequence[int], configured: Optional[int], config_path: str,
 ) -> Tuple[bool, str]:
@@ -154,6 +200,16 @@ def main() -> int:
 
     _, backend_name = backend_for_platform()
     print(f"Platform : {platform.system()}  |  OpenCV {cv2.__version__}  |  backend {backend_name}")
+
+    if args.index is None and load_stream_url(args.config):
+        url = load_stream_url(args.config)
+        print(f"\nConfig {args.config} uses the Wi-Fi camera stream.")
+        found, line = probe_stream(url, args.seconds)
+        print(line)
+        if not found:
+            print("\n".join(STREAM_HINTS))
+            return 1
+        return 0
 
     if args.index is None:
         configured = load_configured_index(args.config)

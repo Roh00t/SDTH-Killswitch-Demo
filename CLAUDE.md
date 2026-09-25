@@ -29,23 +29,26 @@ machine, or MQTT input handling are safety-critical.
 |---|---|---|
 | Host | Laptop/PC — Windows demo box, macOS dev | — |
 | Edge actuator | ESP32-S3-N16R8 (16 MB flash, 8 MB PSRAM) | CH343 USB-UART @921600, `COM3` |
-| Gimbal | 2× SG90, separate 5 V rail | pan GPIO 5 / tilt GPIO 6 |
-| Effector | KY-008 650 nm laser module, low-side switched | GPIO 7 → 1 kΩ → 2N2222 base, 10 kΩ pulldown |
-| Camera | USB UVC webcam, opened by the HOST via OpenCV | host USB, **not** the ESP32 |
+| Gimbal | 2× SG90, separate 5 V rail | pan GPIO 14 / tilt GPIO 21 |
+| Effector | KY-008 650 nm laser module, low-side switched | GPIO 1 → 1 kΩ → 2N2222 base, 10 kΩ pulldown |
+| Camera | OV5640 on the ESP32-S3's camera connector (ESP32-S3-EYE layout), MJPEG over Wi-Fi | GPIO 4–13, 15–18; host reads `camera.stream_url` |
 
-**The camera is on the host, deliberately.** An OV5640 wired to the ESP32-S3 is
-architecturally excluded, not merely unimplemented — see *Why the camera is not on the
-ESP32* below. `helper/vision/frame_source.py` opens a UVC device by index; it has no
-path that reaches a DVP/MIPI sensor.
+**The camera streams from the ESP32-S3; vision stays on the host.** The rig has no USB
+webcam, and the camera must turn with the gimbal (the control law drives the target to
+the image centre). `HttpStreamSource` in `helper/vision/frame_source.py` reads the
+firmware's `/stream`; `UsbCameraSource` still serves a USB webcam when `stream_url` is
+null. See *The camera on the ESP32: what it costs* below.
 
 **Use the CH343 UART port, never the native USB-CDC port.** The S3 exposes both. The
 bridge stays enumerated across ESP32 resets; native USB re-enumerates and takes the
 host's serial handle with it. `_BRIDGE_HINTS` in `helper/hardware/actuator.py` matches
 the CH343 family and deliberately does *not* match `USB Serial Device`.
 
-### Why the camera is not on the ESP32
+### The camera on the ESP32: what it costs
 
-Three independent blockers, any one of which is disqualifying:
+This section used to argue the camera must never go on the ESP32. The rig has no other
+camera that turns with the gimbal, so it went on anyway (firmware v3). Each original
+blocker is below with what was done about it; none of them vanished.
 
 1. **GPIO collision.** ESP32-S3 camera wiring occupies most of GPIO 4–18 for the DVP
    data bus. GPIO 5, 6 and 7 — pan, tilt and the effector gate — carry camera signals
@@ -55,19 +58,35 @@ Three independent blockers, any one of which is disqualifying:
    drive the effector at line rate, outside every interlock. The rig's camera ribbon
    stays unplugged. The actuator pins would have to move, and the effector pin is the
    one carrying the 10 kΩ pulldown.
+   **Handled:** the actuator moved to pan 14, tilt 21, effector 1 (pulldown moved with
+   it), and `static_assert`s in the firmware refuse to build if any actuator pin is a
+   camera pin. Never flash any other sketch (e.g. a stock CameraWebServer) onto this
+   board: on its connector GPIO 7 is still HREF.
 2. **The link cannot carry the pixels.** The UART bridge runs at 921600 baud ≈ 92 KB/s.
    One 1280×720 MJPEG frame is 50–100 KB. That is roughly 1 fps, against a control loop
    designed around ~5 fps of inference. Streaming over WiFi instead adds 100–200 ms to
    the glass-to-photon budget that `LatencyTracker` exists to minimise.
+   **Accepted:** frames go over Wi-Fi, not the UART, and the UART protocol is unchanged.
+   Frames are stamped when the host receives them, so the ESP32's JPEG encode and the
+   Wi-Fi hop are **not** in the measured compute latency: the lead predictor under-leads
+   by that much. The stream serves one client at a time, and the S3 is 2.4 GHz only.
 3. **It puts vision on the safety processor.** The ESP32 is the safety authority: it
    owns the 250 ms deadman, the 2000 ms burn ceiling and the 50 Hz servo update. Adding
    camera DMA and a WiFi stack to that core competes with exactly those deadlines.
+   **Mitigated, not removed:** camera, Wi-Fi and the stream server run on core 0 and
+   start only after `setup()` has made the effector safe; the deadman, burn ceiling,
+   serial protocol and servo update stay in `loop()` on core 1, which shares no lock with
+   them. Only `loop()` writes the UART, so a camera line can never split an `ST` frame.
+   The 13/13 proof below predates this, so it must be re-run with the stream open.
 
 Onboard inference is not a third option: YOLO11s does not run on an S3.
 
-### HITL verification status — actuator path COMPLETE
+### HITL verification status — MUST BE RE-RUN after the v3 rewire
 
-`python -m tools.serial_probe --port COM3` — **13/13 PASS** on the Windows rig.
+`python -m tools.serial_probe --port COM3` — **13/13 PASS** on the Windows rig, with
+firmware v2 on the **old pins (5/6/7)**. Firmware v3 moved every actuator pin and added
+the camera. Until 13/13 passes again on v3, with a browser holding the stream open, the
+actuator path is **not** verified.
 
 **Verified:**
 
@@ -196,7 +215,7 @@ python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 285 tests, zero hardware
+pytest tests/ -q                                    # 297 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -230,7 +249,8 @@ Not style preferences — each one has a real bug behind it.
 
 7. **Zero-latency capture is a grab thread, not a property.** `CAP_PROP_BUFFERSIZE = 1`
    is honoured by V4L2/DSHOW and **ignored by AVFoundation on macOS**. It is set as a
-   hint; the load-bearing mechanism is the newest-frame-wins reader thread.
+   hint; the load-bearing mechanism is the newest-frame-wins reader thread, in both
+   `UsbCameraSource` and `HttpStreamSource` (FFmpeg buffers network frames too).
 
 8. **The effector fails safe.** LOW is the default in every state, every error path,
    every exception handler, and on the firmware's 250 ms deadman.
@@ -298,7 +318,7 @@ a human reads.
 
 ## Testing
 
-285 tests, all hardware-free, ~2 s.
+297 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
@@ -309,6 +329,7 @@ a human reads.
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
 | `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket, dashboard NO LINK, strict-JSON frames, operator tasking and topic routing |
 | `test_camera_probe.py` | Configured camera index FOUND / NOT FOUND, per-OS no-camera hints |
+| `test_stream_source.py` | Wi-Fi camera: newest frame, reconnect, unhealthy on loss, flip, real MJPEG decode of the firmware's format |
 | `test_sim_scene.py` | `--sim-target` scene: refuses a real actuator, closes the loop, fresh ids on reset |
 
 **Unit tests are necessary but not sufficient.** Five real bugs were found only by running

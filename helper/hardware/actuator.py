@@ -334,7 +334,8 @@ class SerialActuator(ActuatorDriver):
                     self._errors.append(line)
             elif line.startswith("DIAG") or "ATTACH FAILED" in line:
                 logger.warning("Firmware: %s", line)
-            elif line.startswith("OK BOOT"):
+            elif line.startswith("OK BOOT") or line.startswith("CAM "):
+                # CAM lines carry the camera stream URL once Wi-Fi is up.
                 logger.info("Firmware: %s", line)
             elif not line.startswith("OK"):
                 logger.debug("Firmware: %s", line)

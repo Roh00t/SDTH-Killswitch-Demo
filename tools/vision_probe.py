@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 
 from helper.vision.detector import UltralyticsDetector
-from helper.vision.frame_source import UsbCameraSource
+from helper.vision.frame_source import HttpStreamSource, UsbCameraSource
 
 _PALETTE = {
     "drone": (80, 220, 80), "bird": (60, 180, 250),
@@ -62,11 +62,18 @@ def main() -> int:
     print(f"Node would use: conf>={node_conf}  classes={sorted(node_classes)}")
     print(f"Probe is using: conf>={conf_floor}  classes=ALL\n")
 
-    camera = UsbCameraSource(
-        device_index=args.device if args.device is not None else cam_cfg["device_index"],
-        width=cam_cfg["width"], height=cam_cfg["height"],
-        target_fps=cam_cfg["target_fps"], use_mjpg=cam_cfg["use_mjpg"],
-    )
+    if args.device is None and cam_cfg.get("stream_url"):
+        camera = HttpStreamSource(
+            cam_cfg["stream_url"],
+            flip_horizontal=bool(cam_cfg.get("flip_horizontal", False)),
+            flip_vertical=bool(cam_cfg.get("flip_vertical", False)),
+        )
+    else:
+        camera = UsbCameraSource(
+            device_index=args.device if args.device is not None else cam_cfg["device_index"],
+            width=cam_cfg["width"], height=cam_cfg["height"],
+            target_fps=cam_cfg["target_fps"], use_mjpg=cam_cfg["use_mjpg"],
+        )
     camera.start()
 
     peak: Dict[str, float] = defaultdict(float)

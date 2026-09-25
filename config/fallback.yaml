@@ -15,6 +15,15 @@ camera:
   # span and measure. It sets the pixel-to-degree gain for the whole control
   # loop, so an error here shows up as sluggish or oscillatory tracking.
   horizontal_fov_deg: 65.0
+  # ESP32-S3 Wi-Fi camera. When set, it is used INSTEAD of device_index.
+  # The firmware prints it on COM3 once Wi-Fi is up ("CAM http://.../stream"),
+  # and main.py logs it. null = use the USB camera at device_index.
+  # With the OV5640, re-measure horizontal_fov_deg above for that lens.
+  stream_url: null
+  # If the gimbal turns AWAY from the target, flip that axis (stream only):
+  # pan wrong -> flip_horizontal, tilt wrong -> flip_vertical.
+  flip_horizontal: false
+  flip_vertical: false
 
 # FALLBACK PROFILE — stock COCO weights.
 # Use when model/best.onnx is not detecting reliably. Same pipeline, same code,

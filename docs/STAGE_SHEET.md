@@ -1,7 +1,8 @@
 # Stage Sheet: physical node
 
 Windows laptop → CH343 `COM3` → ESP32-S3 → two SG90s and a KY-008 650 nm laser (a
-low-power proxy for a high-energy laser). The camera is a USB webcam on the laptop.
+low-power proxy for a high-energy laser). The camera is the OV5640 on the ESP32-S3, mounted
+on the gimbal, streaming to the laptop over Wi-Fi (firmware v3).
 
 **Roles**
 
@@ -24,11 +25,31 @@ low-power proxy for a high-energy laser). The camera is a USB webcam on the lapt
   (OPERATOR_AUTH). SPACE can come at any second after that.
 - [ ] Emergency stop: **pull the ESP32 USB cable**. The firmware cuts the laser within
   250 ms.
-- [ ] The actuator board runs `firmware/esp32_actuator` and nothing else. **Never flash a
-  camera sketch onto it**, and keep **its camera ribbon unplugged**. On the ESP32-S3-EYE
-  layout most N16R8 camera boards use, the camera connector is wired to GPIO 5 (SIOC),
-  6 (VSYNC) and 7 (HREF), which are pan, tilt and the laser gate. A camera sketch would
-  let HREF drive the laser.
+- [ ] The actuator board runs `firmware/esp32_actuator` **v3** (its boot line says
+  `killswitch-actuator v3`) and nothing else. **Never flash any other sketch onto it**,
+  a stock CameraWebServer included: on this board's camera connector GPIO 7 is HREF, a
+  camera line, and a sketch that doesn't know about the laser can drive it.
+
+## One-time: rewire, flash, re-verify (before the first v3 run)
+
+The camera's connector owns GPIO 4–18. Firmware v3 moves the actuator off 5/6/7 and will
+not build if any actuator pin lands on a camera pin.
+
+| ☐ | Step | Action | Pass when |
+|---|---|---|---|
+| ☐ | Power off | Unplug the ESP32 USB **and** the servo rail | Nothing lit |
+| ☐ | Pan servo | Signal wire GPIO **5 → 14** | — |
+| ☐ | Tilt servo | Signal wire GPIO **6 → 21** | — |
+| ☐ | Laser gate | Move the 1 kΩ resistor's ESP32 end **and** the 10 kΩ pulldown's ESP32 end from GPIO **7 → 1** (the pulldown's other end stays on GND) | **Nothing** left on GPIO 5, 6 or 7 |
+| ☐ | Camera | Ribbon seated; camera fixed to the **moving** part of the gimbal, looking where the laser points | It turns with the laser |
+| ☐ | Wi-Fi details | In `firmware/esp32_actuator/`, copy `wifi_secrets.example.h` to `wifi_secrets.h`, then set your hotspot name and password | The ESP32-S3 is **2.4 GHz only**: on an iPhone hotspot turn on *Maximise Compatibility* |
+| ☐ | Flash | Arduino IDE, Tools: Board **ESP32S3 Dev Module** (not AI Thinker), USB CDC On Boot **Disabled**, PSRAM **OPI PSRAM**, Flash Size **16MB**, Partition **16M Flash (3MB APP/9.9MB FATFS)**, Port **COM3**. Upload. Then **close the Serial Monitor** | Upload finishes. A `static assertion failed` error means a pin collides: fix the wiring constants, never delete the check |
+| ☐ | Camera address | `python -m tools.serial_probe --port COM3 --interactive`. Wait about 10 s | `Firmware: OK BOOT killswitch-actuator v3 … pwm=ok`, then `Firmware: CAM http://<ip>/stream`. Put that URL in `camera.stream_url` in `config/fallback.yaml`. `CAM FAIL` means check the ribbon and the PSRAM setting |
+| ☐ | Direction check | Still in that shell, with `http://<ip>/stream` open in a browser: `a 60 90`, then `a 120 90` | The picture slides **left**. If it slides right, set `camera.flip_horizontal: true` |
+| ☐ | | `a 90 80`, then `a 90 100` | The picture slides **down**. If it slides up, set `camera.flip_vertical: true`. Without this the gimbal turns **away** from the target |
+| ☐ | Field of view | Put an object at the picture's **right** edge (`a <p1> 90`), then raise pan until it reaches the **left** edge (`a <p2> 90`) | Set `camera.horizontal_fov_deg` to `p2 − p1`. It sets the degrees-per-pixel gain; 65 was the old webcam's |
+| ☐ | Re-verify 13/13 | Matte backstop in place. Keep the stream **open in the browser**, `q` the shell, then `python -m tools.serial_probe --port COM3` | **13/13 PASS** with the camera streaming. Anything less: stop and fix before any demo |
+| ☐ | Free the stream | Close the browser tab | The stream serves **one viewer at a time**; `main.py` needs it |
 
 ## T-60: hardware and host
 
@@ -38,11 +59,11 @@ low-power proxy for a high-energy laser). The camera is a USB webcam on the lapt
 | ☐ | Laptop never sleeps | On AC power. `powercfg /change standby-timeout-ac 0`. Power Options → Advanced → USB settings → USB selective suspend → **Disabled** | Suspend would drop the CH343 mid-demo, and the node falls back to IDLE with "serial link lost" |
 | ☐ | Power order | 1. ESP32 USB into the **labelled** port. 2. Then the servo 5 V rail | Servos go to centre (90/90); laser off |
 | ☐ | Serial port | `python -m tools.serial_probe --list` | A CH343 (`USB-Enhanced-SERIAL CH343`) on **COM3**. On any other COM, set `actuator.port` in `config/fallback.yaml` |
-| ☐ | Camera ribbon off the actuator | Power off, then unplug the camera ribbon from the ESP32-S3's camera connector | Ribbon out. It shares pins with the servos and laser; vision uses the USB webcam |
-| ☐ | External camera | Close Teams, Zoom, the Camera app and browser tabs. Run `python -m tools.camera_probe --config config/fallback.yaml` | Prints `camera.device_index=1 -> FOUND`. If it says `NOT FOUND` or no cameras, follow the hint it prints. To tell which index is the external camera, unplug it and re-run: the index that disappears is the external one, and that goes in `camera.device_index` |
+| ☐ | Same network | Laptop and ESP32 both on the phone hotspot (2.4 GHz; iPhone: *Maximise Compatibility*) | — |
+| ☐ | Camera stream | Close any browser tab showing the stream. `python -m tools.camera_probe --config config/fallback.yaml` | `camera.stream_url=… -> FOUND (640x480, N fps)`. `NOT FOUND`: follow the hints it prints. The IP may have changed: re-read the `CAM` line with `serial_probe --interactive` (then `q`) |
 | ☐ | Mark the target spot | `python -m tools.serial_probe --port COM3 --interactive`, then `a 45 97`, tape where the camera points, then `a 90 90`, then **`q`** | Tape on the backstop. **Quit** before step B: COM3 is exclusive. Never run `serial_probe` without `--interactive` here, because the full probe **fires the laser** |
 | ☐ | The target is detected | Target on its stand at the tape. `python -m tools.vision_probe --config config/fallback.yaml`, then **Q** to quit (the camera is exclusive) | A box labelled `bird`, `airplane`, `kite` or `frisbee` at **≥ 0.40**. COCO has no drone class, so a drone prop usually fails this |
-| ☐ | Works offline | `dir yolo11s.pt` in the repo folder, then run the whole sheet once **with Wi-Fi off** | The file exists. It only auto-downloads when online |
+| ☐ | Works without internet | `dir yolo11s.pt` in the repo folder, then run the whole sheet once with **no internet** (hotspot mobile data off; the camera still needs the hotspot itself) | The file exists. It only auto-downloads when online |
 | ☐ | Broker is local only | `Get-Service mosquitto`, then `netstat -an \| findstr :1883` | Running, listening on `127.0.0.1:1883` only. If it shows `0.0.0.0:1883`, anyone on the hotspot can send radar cues (cues carry no token): set `listener 1883 127.0.0.1` in `mosquitto.conf` and restart the service |
 
 ## T-15: tuning, only if the gimbal misbehaves
@@ -108,6 +129,8 @@ Times are measured from launching window D.
 | SPACE did nothing | Keys only reach the **Operator Console** window: click its title bar. SPACE only counts in OPERATOR_AUTH. If the window expired, the node re-holds and asks again about 3 s later. A late SPACE is **discarded, not saved**, so press again in the new window |
 | `Could not open COM3` | Something else holds the port (`serial_probe`, the Arduino serial monitor), or it moved: `serial_probe --list`. Otherwise use the fallback below |
 | Pill stuck in SCAN | The target isn't detected: check it's at the tape, check the lighting, re-run `vision_probe` |
+| Node drops to IDLE with `camera lost` | The stream died: ESP32 power, hotspot, or a browser tab took the one stream slot. Close the tab, check `camera_probe`, restart window B |
+| Gimbal turns **away** from the target | Wrong image direction: set `flip_horizontal` (pan) or `flip_vertical` (tilt) in `config/fallback.yaml`, restart window B |
 | Dashboard reads CONNECTING | Window D isn't running |
 | STATE `NO LINK`, Panel C `NO NODE TELEMETRY` | Window B isn't running or isn't on the broker |
 
@@ -124,6 +147,7 @@ loud**: a judge who spots it unprompted will assume you hid it.
 | Say | Don't say |
 |---|---|
 | Windows laptop + ESP32-S3; YOLO11s | Jetson, YOLOv8, GStreamer |
+| The ESP32's camera streams to the laptop over Wi-Fi; YOLO runs on the laptop | "AI on the ESP32" or "edge inference" |
 | KY-008, a milliwatt-class **proxy** for a 3–5 kW laser | "a simulated 3–5 kW laser" |
 | P + velocity feed-forward + lead prediction | "PID" |
 | IDLE → SCAN → TRACK → HOLD → OPERATOR_AUTH → ENGAGE | DETECT, BRANCH, EXECUTE |
