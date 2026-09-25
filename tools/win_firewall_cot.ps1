@@ -1,4 +1,4 @@
-# Killswitch - open Windows Firewall for TAK CoT multicast.
+# Killswitch - open Windows Firewall for TAK CoT multicast and the phone dashboard.
 # RUN AS ADMINISTRATOR on the WinTAK machine:
 #   powershell -ExecutionPolicy Bypass -File .\win_firewall_cot.ps1
 #
@@ -25,6 +25,16 @@ New-NetFirewallRule -DisplayName "TAK CoT UDP Out" -Direction Outbound `
     -Protocol UDP -LocalPort $Port -Action Allow `
     -Profile Domain,Private,Public | Out-Null
 Write-Host "[+] Outbound UDP $Port allowed (Domain, Private, Public)" -ForegroundColor Green
+
+# Live dashboard for a phone on the same network (iPhone Safari): the page is
+# served by `python -m http.server 8000` and its feed by the bridge on 8765.
+Get-NetFirewallRule -DisplayName "Killswitch Dashboard*" -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule -ErrorAction SilentlyContinue
+
+New-NetFirewallRule -DisplayName "Killswitch Dashboard TCP In" -Direction Inbound `
+    -Protocol TCP -LocalPort 8000,8765 -Action Allow `
+    -Profile Domain,Private,Public | Out-Null
+Write-Host "[+] Inbound  TCP 8000, 8765 allowed (dashboard for phones on this network)" -ForegroundColor Green
 
 # A firewall rule alone is not sufficient. Two further things bite on demo day.
 Write-Host "`n--- Checks the firewall rule does NOT cover ---" -ForegroundColor Yellow

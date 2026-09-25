@@ -47,7 +47,7 @@ import socket
 import sys
 import time
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import aiomqtt
 
@@ -102,6 +102,10 @@ CUE_DEADBAND_DEG = 1.5          # below this, do not re-cue at all
 SIM_TICK_HZ = 10.0
 COT_BROADCAST_HZ = 2.0
 WS_BROADCAST_HZ = 5.0
+# Longest a single dashboard send may take before that client is dropped. A
+# phone that auto-locks keeps its socket open but stops reading; without this,
+# its full write buffer blocks the shared broadcast and freezes every screen.
+WS_SEND_TIMEOUT_S = 0.5
 
 
 # ---- state -----------------------------------------------------------------
@@ -605,30 +609,80 @@ async def task_cue(fleet: FleetState, client: aiomqtt.Client, enabled: bool) -> 
         }), qos=1)
 
 
+async def serve_client(ws: Any, clients: Set[Any]) -> None:
+    """Register one dashboard connection and hold it until it closes.
+
+    The dashboard is receive-only, and so is this socket: anything a client
+    sends is read and discarded. It used to parse "authorise"/"abort" into the
+    event log under a comment claiming the veto went out over MQTT. It never
+    did, and on a socket reachable from the LAN that was unauthenticated input
+    for no benefit. Frames are still read rather than ignored, so a chatty
+    client cannot fill its receive queue and stall its own connection.
+
+    Args:
+        ws: The accepted WebSocket connection.
+        clients: The shared set the broadcast sends to.
+
+    Thread: one asyncio task per connection, on the bridge's event loop.
+    """
+    from websockets.exceptions import ConnectionClosed
+
+    clients.add(ws)
+    logger.info("Dashboard connected (%d total)", len(clients))
+    try:
+        async for _ in ws:
+            pass
+    except ConnectionClosed:
+        pass  # a dropped phone or a closed tab is normal, not an error
+    finally:
+        clients.discard(ws)
+
+
+async def broadcast(clients: Set[Any], blob: str, timeout_s: float = WS_SEND_TIMEOUT_S) -> None:
+    """Send one frame to every dashboard client, dropping any that can't keep up.
+
+    Each client gets its own deadline. A client that times out or has closed is
+    removed from `clients`, so it can't hold the others back; its keepalive
+    closes it, and the dashboard's backoff reconnects it once it reads again.
+
+    Args:
+        clients: Connected dashboards. Mutated: stalled clients are removed.
+        blob: The serialised frame.
+        timeout_s: Per-client send deadline.
+
+    Thread: the bridge's event loop.
+    """
+    from websockets.exceptions import ConnectionClosed
+
+    async def send_one(client: Any) -> None:
+        try:
+            await asyncio.wait_for(client.send(blob), timeout_s)
+        except (asyncio.TimeoutError, ConnectionClosed) as exc:
+            if client in clients:
+                clients.discard(client)
+                logger.warning("Dropped a dashboard client that stopped reading (%s)",
+                               type(exc).__name__)
+
+    targets = list(clients)
+    results = await asyncio.gather(*(send_one(c) for c in targets), return_exceptions=True)
+    # Anything else is unexpected. Log it and drop that client rather than let
+    # it cancel the TaskGroup, which would take the cue path down with it.
+    for client, result in zip(targets, results):
+        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+            clients.discard(client)
+            logger.error("Dashboard send failed unexpectedly, client dropped: %r", result)
+
+
 async def task_websocket(fleet: FleetState, host: str, port: int) -> None:
-    """Serve FleetState + live MAVLink frames to the dashboard."""
+    """Serve FleetState + live MAVLink frames to the dashboard.
+
+    Output-only: see serve_client. Binding a non-loopback host (--ws-host
+    0.0.0.0) lets a phone on the same network open the dashboard.
+    """
     import websockets
 
-    clients: set = set()
+    clients: Set[Any] = set()
     encoders = {"KILLSWITCH_NODE_01": MavlinkEncoder(system_id=1)}
-
-    async def handler(ws):
-        clients.add(ws)
-        logger.info("Dashboard connected (%d total)", len(clients))
-        try:
-            async for raw in ws:
-                try:
-                    msg = json.loads(raw)
-                except ValueError:
-                    continue
-                # Operator veto travels back out over MQTT, reusing the real
-                # auth schema — target_id binding and nonce stay enforced.
-                if msg.get("action") in ("authorise", "abort"):
-                    fleet.log("operator_action", msg.get("action", ""))
-        except Exception:  # noqa: BLE001 - a dropped client must not kill the task
-            pass
-        finally:
-            clients.discard(ws)
 
     async def pump():
         while True:
@@ -654,12 +708,15 @@ async def task_websocket(fleet: FleetState, host: str, port: int) -> None:
                 enc.global_position_int(fleet.base_lat, fleet.base_lon,
                                         fleet.base_hae).to_dict(),
             ]
-            blob = json.dumps(payload)
-            await asyncio.gather(*(c.send(blob) for c in list(clients)),
-                                 return_exceptions=True)
+            await broadcast(clients, json.dumps(payload))
 
-    async with websockets.serve(handler, host, port):
+    async with websockets.serve(lambda ws: serve_client(ws, clients), host, port):
         logger.info("WebSocket serving on ws://%s:%d", host, port)
+        if host not in ("localhost", "127.0.0.1", "::1"):
+            from tools.multicast_test import local_ips  # stdlib-only
+            for ip in local_ips():
+                logger.info("Phone on this network: open http://%s:8000/c2_dashboard.html "
+                            "(with http.server on 8000)", ip)
         await pump()
 
 

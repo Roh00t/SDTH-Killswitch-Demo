@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KILLSWITCH C2</title>
 <!--
   Killswitch — 1:N Tactical C2 Dashboard.
@@ -102,6 +103,19 @@
   button.on{background:var(--amber);color:#0B0F19;border-color:var(--amber);font-weight:700}
   .empty{display:flex;align-items:center;justify-content:center;height:100%;
          color:var(--dim);font-size:11px;letter-spacing:.09em;text-align:center;padding:20px}
+  /* ---- phone (iPhone Safari over the LAN) ----
+     Above 760 px nothing changes: the laptop keeps its fixed 2x2 console.
+     Below it the page scrolls and the panels stack in a single column. */
+  @media (max-width: 760px){
+    html,body{height:auto;overflow:auto}
+    body{grid-template-rows:auto auto}
+    header{flex-wrap:wrap;row-gap:6px;padding:8px 12px}
+    header .sep,header .spacer{display:none}
+    main{grid-template-columns:1fr;grid-template-rows:none}
+    .panel{min-height:240px}
+    #radarWrap{height:auto}
+    canvas{height:auto;width:100%}
+  }
 </style>
 </head>
 <body>
@@ -167,7 +181,10 @@
 
 <script>
 "use strict";
-const WS_URL = "ws://localhost:8765";
+// Connect back to whichever machine served this page, so a phone that loaded
+// it from the laptop reaches the laptop's bridge rather than itself. Opened as
+// a file:// there is no hostname, so fall back to this machine.
+const WS_URL = "ws://" + (location.hostname || "localhost") + ":8765";
 
 // Gimbal pan is 0..180 in gimbal space; pan 90 == boresight azimuth.
 // Mirrors cue_to_gimbal() in helper/state/sweep.py.

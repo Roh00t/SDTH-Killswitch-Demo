@@ -117,6 +117,16 @@ reads `NO LINK` before the first report, on the MQTT last-will, or after
 Never add a path that sets engagement state on the map by hand; a status a keypress can
 fake is a status a judge cannot trust.
 
+### The dashboard WebSocket is output-only too
+
+`--ws-host 0.0.0.0` puts the dashboard feed on the LAN for a phone. `serve_client` reads
+and discards everything a client sends. It used to log `authorise`/`abort` under a comment
+claiming the veto went out over MQTT, which it never did. Keep it receive-nothing: a
+control input here would be unauthenticated. `broadcast` gives each client a 0.5 s send
+deadline and drops laggards, because `websockets` blocks `send()` once ~2 MB queue behind a
+client that has stopped reading. Without the deadline, one locked phone freezes every
+screen.
+
 ### Pan/tilt bounds are not configurable — on purpose
 
 No YAML file defines them, and none should. The limits live in
@@ -164,7 +174,7 @@ python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 226 tests, zero hardware
+pytest tests/ -q                                    # 231 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -266,7 +276,7 @@ a human reads.
 
 ## Testing
 
-226 tests, all hardware-free, ~2 s.
+231 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
@@ -275,7 +285,7 @@ a human reads.
 | `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop |
 | `test_state_machine.py` | Transition table, sweep bounds, cue geometry, prediction |
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
-| `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will |
+| `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket |
 | `test_sim_scene.py` | `--sim-target` scene: refuses a real actuator, closes the loop, fresh ids on reset |
 
 **Unit tests are necessary but not sufficient.** Five real bugs were found only by running

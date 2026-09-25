@@ -440,3 +440,104 @@ class TestHonestLabels:
 
         asyncio.run(task_mqtt_consume(fleet, FakeClient([{"event": "node_lost"}])))
         assert fleet.nodes["KILLSWITCH_NODE_01"].to_cot().callsign == "KILLSWITCH-01 [NO LINK]"
+
+
+# ---- dashboard socket: output-only, and one stalled phone can't freeze it ----
+
+
+class TestDashboardSocket:
+    class Good:
+        def __init__(self):
+            self.got = []
+
+        async def send(self, blob):
+            self.got.append(blob)
+
+    class Stalled:
+        """A locked iPhone: socket open, never reads, send never returns."""
+
+        async def send(self, blob):
+            import asyncio
+            await asyncio.sleep(3600)
+
+    class Closed:
+        async def send(self, blob):
+            from websockets.exceptions import ConnectionClosed
+            raise ConnectionClosed(None, None)
+
+    class Broken:
+        async def send(self, blob):
+            raise RuntimeError("unexpected")
+
+    def _run(self, clients, timeout_s=0.05):
+        import asyncio
+
+        from tools.c2_bridge import broadcast
+
+        # Outer guard: a regression to an unbounded send fails here, not hangs.
+        asyncio.run(asyncio.wait_for(broadcast(clients, "frame", timeout_s), 2.0))
+
+    def test_a_stalled_client_is_dropped_and_the_rest_still_get_the_frame(self):
+        import time
+
+        good, stalled = self.Good(), self.Stalled()
+        clients = {good, stalled}
+        t0 = time.monotonic()
+        self._run(clients)
+        assert time.monotonic() - t0 < 1.0
+        assert good.got == ["frame"]
+        assert clients == {good}
+
+    def test_a_closed_client_is_dropped(self):
+        good, closed = self.Good(), self.Closed()
+        clients = {good, closed}
+        self._run(clients)
+        assert clients == {good} and good.got == ["frame"]
+
+    def test_an_unexpected_send_error_is_contained(self):
+        good, broken = self.Good(), self.Broken()
+        clients = {good, broken}
+        self._run(clients)  # must not raise into the TaskGroup
+        assert clients == {good} and good.got == ["frame"]
+
+    def test_inbound_frames_are_discarded_and_the_client_unregistered(self):
+        import asyncio
+        import json
+
+        from tools.c2_bridge import serve_client
+
+        clients: set = set()
+        seen_registered = []
+
+        class FakeWS:
+            def __aiter__(self):
+                return self._frames()
+
+            async def _frames(self):
+                seen_registered.append(self in clients)
+                yield json.dumps({"action": "authorise"})
+                yield json.dumps({"action": "abort"})
+
+        asyncio.run(serve_client(FakeWS(), clients))
+        assert seen_registered == [True]
+        assert clients == set()
+
+    def test_a_dropped_connection_is_not_an_error(self):
+        import asyncio
+
+        from websockets.exceptions import ConnectionClosed
+
+        from tools.c2_bridge import serve_client
+
+        clients: set = set()
+
+        class DropsMidway:
+            def __aiter__(self):
+                return self._frames()
+
+            async def _frames(self):
+                yield "x"
+                raise ConnectionClosed(None, None)
+
+        asyncio.run(serve_client(DropsMidway(), clients))
+        assert clients == set()

@@ -383,6 +383,43 @@ by default. If unicast still shows nothing, add a UDP input on port 6969.
 The map refreshes at 2 Hz, so a state shorter than half a second (SCAN usually is) may
 not appear on it. The dashboard updates at 5 Hz.
 
+### iPhone: live dashboard in Safari
+
+ATAK-CIV is Android-only, and **iTAK, the iPhone app, can't receive the bridge's CoT.** It
+doesn't take multicast, and it connects to a TAK server over TLS with a per-device
+certificate. An iPhone can show the **live C2 dashboard** instead. It's the same page the
+laptop shows, in Safari, with no app to install. It is not a TAK client, so don't present it
+as TAK interoperability.
+
+1. Put the laptop on the iPhone's **Personal Hotspot**, or put both on the same Wi-Fi. The
+   hotspot keeps the venue's access point out of the path.
+2. Run `tools\win_firewall_cot.ps1` as Administrator once. It now also opens inbound TCP
+   8000 (the page) and 8765 (the live feed). If the laptop's network shows as `Public`,
+   set it to `Private` as the script prints.
+3. Serve the page and start the bridge with its feed open to the network:
+
+   ```bat
+   python -m http.server 8000 -d tools
+   python -m tools.c2_bridge --threat-start-m 420 --ws-host 0.0.0.0
+   ```
+
+4. The bridge prints the address to open, for example
+   `Phone on this network: open http://172.20.10.2:8000/c2_dashboard.html`. On the iPhone
+   hotspot the laptop is usually `172.20.10.x`. Open that in Safari.
+
+Below 760 px wide the panels stack into one scrolling column, and the laptop layout is
+unchanged. The page connects back to whichever machine served it, so the laptop still
+works from `localhost` or `file://`.
+
+**If the phone locks or Safari goes to the background,** the bridge drops that phone after
+0.5 s without a read. Without the drop, a locked phone would freeze the **laptop's**
+dashboard as well, about a minute later, once ~2 MB had queued behind it (measured:
+7.3 KB frames at 5 Hz). When the phone wakes, the page reconnects on its own within 8 s.
+
+**The feed is output-only.** The bridge reads and discards anything a client sends, so a
+device on the network can watch but can't write. `http.server` also lists the `tools/`
+source files to anyone on the network; there are no credentials in that folder.
+
 ---
 
 ## Demo Runbook — Windows, 4 terminals
