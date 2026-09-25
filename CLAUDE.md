@@ -48,9 +48,13 @@ the CH343 family and deliberately does *not* match `USB Serial Device`.
 Three independent blockers, any one of which is disqualifying:
 
 1. **GPIO collision.** ESP32-S3 camera wiring occupies most of GPIO 4–18 for the DVP
-   data bus. GPIO 5, 6 and 7 — pan, tilt and the effector gate — are inside that range
-   on every common S3 camera pinout. The actuator pins would have to move, and the
-   effector pin is the one carrying the 10 kΩ pulldown.
+   data bus. GPIO 5, 6 and 7 — pan, tilt and the effector gate — carry camera signals
+   on the ESP32-S3-EYE, DFRobot and M5Stack S3 layouts in Espressif's `camera_pins.h`
+   (XIAO and CAM_LCD avoid them). The EYE layout, used by most N16R8 camera boards,
+   puts SIOC on 5, VSYNC on 6 and **HREF on 7, the laser gate**: a camera sketch would
+   drive the effector at line rate, outside every interlock. The rig's camera ribbon
+   stays unplugged. The actuator pins would have to move, and the effector pin is the
+   one carrying the 10 kΩ pulldown.
 2. **The link cannot carry the pixels.** The UART bridge runs at 921600 baud ≈ 92 KB/s.
    One 1280×720 MJPEG frame is 50–100 KB. That is roughly 1 fps, against a control loop
    designed around ~5 fps of inference. Streaming over WiFi instead adds 100–200 ms to
