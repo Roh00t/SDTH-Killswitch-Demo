@@ -219,7 +219,7 @@ class UsbCameraSource(FrameSource):
         self._running.clear()
         thread = self._thread
         if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
+            thread.join(timeout=5.0)
             if thread.is_alive():
                 logger.warning("Grabber thread did not exit within 2s")
         self._thread = None

@@ -79,7 +79,7 @@ engagement:
   hold_duration_s: 3.0       # Continuous. Resets on any excursion.
   track_loss_timeout_s: 1.0  # No target for this long -> back to SCAN.
   scan_timeout_s: 30.0       # No detection for this long -> IDLE.
-  auth_timeout_s: 10.0       # No operator decision -> back to TRACK.
+  auth_timeout_s: 20.0       # No operator decision -> back to TRACK.
   # 1.8, NOT 2.0. The firmware's independent ceiling is MAX_BURN_MS = 2000, and
   # it starts its clock when it parses L1 while the host starts its own clock
   # after the serial write returns — so at 2.0 the firmware wins every nominal
