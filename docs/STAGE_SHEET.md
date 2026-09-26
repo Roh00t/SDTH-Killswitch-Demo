@@ -41,6 +41,7 @@ not build if any actuator pin lands on a camera pin.
 | ☐ | Pan servo | Signal wire GPIO **5 → 14** | — |
 | ☐ | Tilt servo | Signal wire GPIO **6 → 21** | — |
 | ☐ | Laser gate | Move the 1 kΩ resistor's ESP32 end **and** the 10 kΩ pulldown's ESP32 end from GPIO **7 → 1** (the pulldown's other end stays on GND) | **Nothing** left on GPIO 5, 6 or 7 |
+| ☐ | Laser supply | KY-008 `S` → the board's **5V pin**; KY-008 `−` → 2N2222 **collector**; emitter → GND; middle pin unconnected | On power-up the laser stays **dark**. Lit? Pull the USB: a transistor leg is swapped |
 | ☐ | Camera | Ribbon seated; camera fixed to the **moving** part of the gimbal, looking where the laser points | It turns with the laser |
 | ☐ | Wi-Fi details | In `firmware/esp32_actuator/`, copy `wifi_secrets.example.h` to `wifi_secrets.h`, then set your hotspot name and password | The ESP32-S3 is **2.4 GHz only**: on an iPhone hotspot turn on *Maximise Compatibility* |
 | ☐ | Flash | Arduino IDE, Tools: Board **ESP32S3 Dev Module** (not AI Thinker), USB CDC On Boot **Disabled**, PSRAM **OPI PSRAM**, Flash Size **16MB**, Partition **16M Flash (3MB APP/9.9MB FATFS)**, Port **COM3**. Upload. Then **close the Serial Monitor** | Upload finishes. A `static assertion failed` error means a pin collides: fix the wiring constants, never delete the check |
@@ -48,7 +49,7 @@ not build if any actuator pin lands on a camera pin.
 | ☐ | Direction check | Still in that shell, with `http://<ip>/stream` open in a browser: `a 60 90`, then `a 120 90` | The picture slides **left**. If it slides right, set `camera.flip_horizontal: true` |
 | ☐ | | `a 90 80`, then `a 90 100` | The picture slides **down**. If it slides up, set `camera.flip_vertical: true`. Without this the gimbal turns **away** from the target |
 | ☐ | Field of view | Put an object at the picture's **right** edge (`a <p1> 90`), then raise pan until it reaches the **left** edge (`a <p2> 90`) | Set `camera.horizontal_fov_deg` to `p2 − p1`. It sets the degrees-per-pixel gain; 65 was the old webcam's |
-| ☐ | Re-verify 13/13 | Matte backstop in place. Keep the stream **open in the browser**, `q` the shell, then `python -m tools.serial_probe --port COM3` | **13/13 PASS** with the camera streaming. Anything less: stop and fix before any demo |
+| ☐ | Re-verify 13/13 | Matte backstop in place. Keep the stream **open in the browser**, `q` the shell, then `python -m tools.serial_probe --port COM3` | **13/13 PASS** with the camera streaming, **and you saw the dot**: on for each pulse, dark at the 2 s cut and at the deadman. PASS alone reads firmware state, not light. Anything less: stop and fix before any demo |
 | ☐ | Free the stream | Close the browser tab | The stream serves **one viewer at a time**; `main.py` needs it |
 
 ## T-60: hardware and host

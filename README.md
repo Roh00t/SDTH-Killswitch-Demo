@@ -129,6 +129,7 @@ Accounting for beam divergence and 1D Fourier heat conduction, continuous track 
 | Servo PAN | 14 | Separate 5 V rail |
 | Servo TILT | 21 | Separate 5 V rail |
 | Effector gate | 1 | 1 kΩ → 2N2222 base; collector sinks KY-008 `−`; **10 kΩ pulldown to GND** |
+| Laser supply | 5V pin | KY-008 `S`; its middle pin stays unconnected. `S` on the collector with `−` on GND never lights, and `serial_probe` still passes |
 | Camera | 4–13, 15–18 | The board's camera connector (ESP32-S3-EYE layout). Nothing else may use these |
 
 **Two wiring rules that are not optional:**
@@ -146,9 +147,9 @@ ESP32 resets, so your serial handle survives. On Windows the bridge shows as
 `USB-Enhanced-SERIAL CH343 (COMn)`; the native port shows as `USB Serial Device (COMn)`.
 Auto-detect matches the first and deliberately refuses the second.
 
-**Power is rail-separated, not galvanically isolated.** The ESP32's 5 V/VIN is left
-unconnected and the servo rail is fed from a second USB-C supply, which keeps servo sag
-off the logic rail. The grounds are still common — through the GND jumper the PWM signals
+**Power is rail-separated, not galvanically isolated.** The ESP32's 5 V/VIN pin is
+never tied to the servo rail; it only feeds the laser (USB 5 V, about 30 mA). The servo
+rail is fed from a second USB-C supply, which keeps servo sag off the logic rail. The grounds are still common — through the GND jumper the PWM signals
 need, and through the host chassis. Say *rail separation* when describing it.
 
 ---

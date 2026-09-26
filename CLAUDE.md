@@ -30,7 +30,7 @@ machine, or MQTT input handling are safety-critical.
 | Host | Laptop/PC — Windows demo box, macOS dev | — |
 | Edge actuator | ESP32-S3-N16R8 (16 MB flash, 8 MB PSRAM) | CH343 USB-UART @921600, `COM3` |
 | Gimbal | 2× SG90, separate 5 V rail | pan GPIO 14 / tilt GPIO 21 |
-| Effector | KY-008 650 nm laser module, low-side switched | GPIO 1 → 1 kΩ → 2N2222 base, 10 kΩ pulldown |
+| Effector | KY-008 650 nm laser module, low-side switched | GPIO 1 → 1 kΩ → 2N2222 base, 10 kΩ pulldown; KY-008 `S` → board 5V pin, `−` → collector |
 | Camera | OV5640 on the ESP32-S3's camera connector (ESP32-S3-EYE layout), MJPEG over Wi-Fi | GPIO 4–13, 15–18; host reads `camera.stream_url` |
 
 **The camera streams from the ESP32-S3; vision stays on the host.** The rig has no USB
@@ -115,8 +115,9 @@ measured travel.
 - The C2 plane end to end: bridge, dashboard, and one clean authorisation through
   `SPACE` → `ENGAGE` → `ENGAGEMENT COMPLETE`.
 
-> `serial_probe --port COM3` **fires the effector** — now a KY-008 laser, not the LED its
-> console prints still describe. Two ~0.5 s pulses, a 2.6 s burn-ceiling test, then a
+> `serial_probe --port COM3` **fires the effector**, a KY-008 laser. Its checks read the
+> firmware's reported state, not light: a laser wired with `S` on the collector never lit
+> on the rig and still scored 13/13. Watch the dot. Two ~0.5 s pulses, a 2.6 s burn-ceiling test, then a
 > deadman test. Matte backstop, area behind it clear, every time it is run.
 
 ### `--sim-target` never touches real hardware

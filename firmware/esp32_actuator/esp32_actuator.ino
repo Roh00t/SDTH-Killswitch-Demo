@@ -38,6 +38,10 @@
  *   GPIO 21 -> Tilt servo signal    (common ground with the ESP32)
  *   GPIO 1  -> Effector gate        (1k -> 2N2222 base; collector sinks the
  *                                    KY-008 '-' terminal; 10k pulldown to GND)
+ *   KY-008 S -> the board's 5V pin  (USB 5 V; middle pin unconnected; emitter
+ *                                    to GND). S on the collector and '-' on GND
+ *                                    puts no supply across the diode: it never
+ *                                    lights, yet serial_probe still passes.
  *
  * The 10k pulldown on GPIO 1 is mandatory. Between power-on and the first line
  * of setup(), every ESP32 GPIO is a floating input. A floating gate is an

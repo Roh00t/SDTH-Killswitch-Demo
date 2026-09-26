@@ -88,7 +88,8 @@ def run_checks(port: str) -> int:
         time.sleep(0.2)
         check("arm accepted", (actuator.last_status() or s).armed)
 
-        print("\nEffector (LED should light ~0.5s)")
+        print("\nEffector (the LASER should light ~0.5s: WATCH it. These checks read the\n"
+              "firmware's reported state, not light)")
         actuator.set_effector(True)
         time.sleep(0.3)
         check("effector energised when armed", (actuator.last_status() or s).laser_on)
@@ -102,7 +103,7 @@ def run_checks(port: str) -> int:
         time.sleep(2.6)
         check("firmware cut the burn at its ceiling", actuator.confirm_effector_off())
 
-        print("\nDeadman (heartbeat suppressed for 0.6s — LED should die on its own)")
+        print("\nDeadman (heartbeat suppressed for 0.6s: the laser should go dark on its own)")
         actuator.arm()
         actuator.set_effector(True)
         time.sleep(0.15)
@@ -124,6 +125,8 @@ def run_checks(port: str) -> int:
         print(f"\n{passed} passed, {failed} failed")
         if failed == 0:
             print("Link is good. Record the port in config and move on.")
+            print("PASS means the firmware reported it. Only your eyes saw whether the laser")
+            print("lit on each pulse and went dark at the 2 s cut and the deadman.")
         return 0 if failed == 0 else 1
 
     except ActuatorError as exc:
