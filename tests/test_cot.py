@@ -778,3 +778,49 @@ class TestPhoneAddresses:
 
         assert order_candidates([], None) == []
         assert order_candidates(["not-an-ip", "::1"], None) == []
+
+
+class TestDashboardOpens:
+    """Window D opens the live page itself: no URL, folder or port to get wrong."""
+
+    def test_the_page_ships_next_to_the_bridge_and_opens_from_disk(self):
+        from tools.c2_bridge import DASHBOARD_PAGE
+
+        assert DASHBOARD_PAGE.is_file()
+        assert DASHBOARD_PAGE.as_uri().startswith("file:")
+        # From file:// the hostname is empty, so the page must fall back to localhost.
+        assert '(location.hostname || "localhost")' in DASHBOARD_PAGE.read_text("utf-8")
+
+    def test_chrome_when_installed(self, monkeypatch):
+        import tools.c2_bridge as bridge
+
+        launched = []
+        monkeypatch.setattr(bridge.subprocess, "Popen",
+                            lambda argv, **kwargs: launched.append(argv))
+        fallback = []
+        opener = bridge.open_dashboard("file:///x/c2_dashboard.html",
+                                       chrome="/opt/chrome", fallback=fallback.append)
+        assert opener == "Chrome"
+        assert launched == [["/opt/chrome", "file:///x/c2_dashboard.html"]]
+        assert fallback == []
+
+    def test_default_browser_without_chrome(self, monkeypatch):
+        import tools.c2_bridge as bridge
+
+        monkeypatch.setattr(bridge, "chrome_path", lambda: None)
+        opened = []
+        assert bridge.open_dashboard("file:///x/c2_dashboard.html",
+                                     fallback=opened.append) == "the default browser"
+        assert opened == ["file:///x/c2_dashboard.html"]
+
+    def test_chrome_found_in_the_windows_user_install(self, monkeypatch, tmp_path):
+        import tools.c2_bridge as bridge
+
+        exe = tmp_path / "Google" / "Chrome" / "Application" / "chrome.exe"
+        exe.parent.mkdir(parents=True)
+        exe.write_bytes(b"")
+        monkeypatch.setattr(bridge.shutil, "which", lambda name: None)
+        for var in ("PROGRAMFILES", "PROGRAMFILES(X86)"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+        assert bridge.chrome_path() == str(exe)

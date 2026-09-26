@@ -87,7 +87,7 @@ two lines went into one window: press Ctrl+C and split them.
 | Window | Command | Healthy when |
 |---|---|---|
 | 0 | `Get-Service mosquitto` | `Running` |
-| A | `python -m http.server 8000 -d tools`, then open `http://localhost:8000/c2_dashboard.html` | The page loads and reads CONNECTING (no bridge yet; expected) |
+| A | Nothing to start. Window D opens the dashboard in Chrome itself. Closed it? `start chrome "$PWD\tools\c2_dashboard.html"` from the repo folder. Never open `:8765` in a browser: that is the data feed, not the page | — |
 | B | `python main.py --config config/fallback.yaml` | `C2 connected to localhost:1883 as killswitch-01`, then a resolved serial port |
 | C | `python -m tools.operator_console --config config/fallback.yaml` | The **Operator Console** window opens and reads `LINK OK` |
 | D, **at T-0** | `python -m tools.c2_bridge --config config/fallback.yaml --threat-start-m 420` | `Operator tasks: token checked…`, `MQTT connected`, `WebSocket serving` |

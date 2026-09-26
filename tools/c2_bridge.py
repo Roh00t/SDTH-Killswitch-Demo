@@ -43,11 +43,16 @@ import ipaddress
 import json
 import logging
 import math
+import os
+import shutil
 import socket
+import subprocess
 import sys
 import time
+import webbrowser
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import aiomqtt
 import yaml
@@ -817,11 +822,63 @@ async def broadcast(clients: Set[Any], blob: str, timeout_s: float = WS_SEND_TIM
             logger.error("Dashboard send failed unexpectedly, client dropped: %r", result)
 
 
-async def task_websocket(fleet: FleetState, host: str, port: int) -> None:
+# The page works straight from disk: a file:// page has no hostname, so it
+# connects to ws://localhost:8765. No page server, no folder to get wrong.
+DASHBOARD_PAGE = Path(__file__).resolve().with_name("c2_dashboard.html")
+
+
+def chrome_path() -> Optional[str]:
+    """Where Chrome is installed, or None.
+
+    Windows keeps chrome.exe off PATH, so the usual install folders are
+    checked as well.
+    """
+    for name in ("chrome", "google-chrome", "chromium"):
+        found = shutil.which(name)
+        if found:
+            return found
+    candidates = [
+        os.path.join(os.environ[var], "Google", "Chrome", "Application", "chrome.exe")
+        for var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")
+        if os.environ.get(var)
+    ]
+    candidates.append("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    return next((c for c in candidates if os.path.isfile(c)), None)
+
+
+def open_dashboard(url: str, chrome: Optional[str] = None,
+                   fallback: Callable[[str], Any] = webbrowser.open) -> str:
+    """Open the dashboard page, in Chrome when it is installed.
+
+    Args:
+        url: The page to open.
+        chrome: Chrome's path; found with chrome_path() when None.
+        fallback: Opens the URL in the default browser when there is no Chrome.
+
+    Returns:
+        What opened it, for the log.
+
+    Raises:
+        OSError: Chrome could not be started.
+
+    Thread: a worker thread (asyncio.to_thread), never the event loop.
+    """
+    chrome = chrome or chrome_path()
+    if chrome:
+        subprocess.Popen([chrome, url], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        return "Chrome"
+    fallback(url)
+    return "the default browser"
+
+
+async def task_websocket(fleet: FleetState, host: str, port: int,
+                         open_browser: bool = False) -> None:
     """Serve FleetState + live MAVLink frames to the dashboard.
 
     Output-only: see serve_client. Binding a non-loopback host (--ws-host
-    0.0.0.0) lets a phone on the same network open the dashboard.
+    0.0.0.0) lets a phone on the same network open the dashboard. With
+    open_browser, the page opens on this laptop once the feed is listening.
     """
     import websockets
 
@@ -857,11 +914,20 @@ async def task_websocket(fleet: FleetState, host: str, port: int) -> None:
 
     async with websockets.serve(lambda ws: serve_client(ws, clients), host, port):
         logger.info("WebSocket serving on ws://%s:%d", host, port)
+        if open_browser:
+            page = DASHBOARD_PAGE.as_uri()
+            try:
+                opener = await asyncio.to_thread(open_dashboard, page)
+                logger.info("Dashboard opened in %s: %s", opener, page)
+            except OSError as exc:
+                logger.warning("Could not open the dashboard (%s). Open %s in Chrome",
+                               exc, page)
         if host not in ("localhost", "127.0.0.1", "::1"):
             from tools.multicast_test import local_ips  # stdlib-only
             for ip in local_ips():
                 logger.info("Phone on this network: open http://%s:8000/c2_dashboard.html "
-                            "(with http.server on 8000)", ip)
+                            "(needs 'python -m http.server 8000 -d tools' run from the "
+                            "repo folder)", ip)
         await pump()
 
 
@@ -890,7 +956,8 @@ async def run(args) -> int:
                 tg.create_task(task_cot_broadcast(fleet, sock, dests, args.stale_pad_s))
                 tg.create_task(task_mqtt_consume(fleet, client, args.task_token))
                 tg.create_task(task_cue(fleet, client, not args.no_cue))
-                tg.create_task(task_websocket(fleet, args.ws_host, args.ws_port))
+                tg.create_task(task_websocket(fleet, args.ws_host, args.ws_port,
+                                              open_browser=not args.no_browser))
     except* aiomqtt.MqttError as eg:
         from helper.comms.mqtt_client import broker_start_hint
         logger.critical("MQTT failure: %s. Is mosquitto running?  %s",
@@ -980,6 +1047,9 @@ def main() -> int:
                         "when the TAK device's clock runs ahead and tracks vanish on arrival")
     p.add_argument("--no-cue", action="store_true",
                    help="Do not publish slew_to_cue — observe only, servos stay put")
+    p.add_argument("--no-browser", action="store_true",
+                   help="Don't open the dashboard page. It is already open: it "
+                        "reconnects by itself within 8 s")
     p.add_argument("--config", default="config/bench.yaml",
                    help="Node config. Only c2.auth_token is read, to check operator "
                         "tasks. Pass the same file as main.py and the console")

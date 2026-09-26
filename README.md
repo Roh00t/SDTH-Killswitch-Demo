@@ -239,7 +239,7 @@ python -m tools.operator_console
 **Tests:**
 
 ```bash
-pytest tests/ -q        # 320 tests, zero hardware, ~7s
+pytest tests/ -q        # 324 tests, zero hardware, ~7s
 ```
 
 ---
@@ -479,7 +479,10 @@ Launch order does not matter, because the dashboard reconnects with capped backo
 this order gives the cleanest console output. Start **Terminal D last**: see the timing
 note.
 
-**Terminal A**, the dashboard page. Then open `http://localhost:8000/c2_dashboard.html`.
+**No terminal for the dashboard page.** Terminal D opens `tools/c2_dashboard.html` in
+Chrome (or the default browser) once its feed is listening; the page works straight from
+disk. `--no-browser` skips that when a tab is already open: it reconnects by itself. A
+phone still needs the page served, from the repo folder:
 
 ```bat
 python -m http.server 8000 -d tools
