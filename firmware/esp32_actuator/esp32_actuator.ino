@@ -59,6 +59,7 @@ static constexpr int PIN_EFFECTOR   = 1;
 #endif
 
 #if KS_CAMERA
+#include <atomic>
 #include "esp_camera.h"
 #include "esp_http_server.h"
 #include <ESPmDNS.h>
@@ -467,7 +468,17 @@ static void pumpSerial() {
 // prints, so camera lines can never interleave with an ST frame on the UART.
 static volatile int  cameraState = 0;    // 0 starting, 1 streaming, -1 init failed
 static volatile int  cameraError = 0;
+static volatile int  cameraPid   = 0;    // sensor product id: 0x5640 on an OV5640
 static httpd_handle_t streamServer = nullptr;
+
+// Wi-Fi diagnostics, same rule: core 0 writes, loop() prints. Without them a
+// hotspot that refuses the board looks exactly like a URL that scrolled past.
+static constexpr int SCAN_PENDING = -100;
+static std::atomic<int> wifiScanCount{SCAN_PENDING};  // published last
+static volatile int  wifiSeenRssi    = 0;    // 0: our SSID was not in the scan
+static volatile int  wifiSeenChannel = 0;
+static char          wifiNearby[4][33] = {}; // a few SSIDs the scan did hear
+static volatile int  wifiDropReason  = 0;    // last STA_DISCONNECTED reason
 
 #define STREAM_BOUNDARY "killswitchframe"
 
@@ -534,7 +545,31 @@ static void startStreamServer() {
   }
 }
 
-/* Core 0. Brings up Wi-Fi, the camera and the stream server, then exits.
+/* Arduino's Wi-Fi event task. Records why the hotspot dropped or refused us;
+ * loop() turns it into words. Never prints: only loop() owns the UART. */
+static void onWifiDisconnected(WiFiEvent_t, WiFiEventInfo_t info) {
+  wifiDropReason = info.wifi_sta_disconnected.reason;
+}
+
+/* Core 0, before WiFi.begin(). Records whether the hotspot is audible at all.
+ * The S3's radio is 2.4 GHz only, so a 5 GHz hotspot never appears here. */
+static void scanForHotspot() {
+  const int n = WiFi.scanNetworks();   // blocks ~2 s, on core 0 only
+  int nearby = 0;
+  for (int i = 0; i < n; ++i) {
+    const String ssid = WiFi.SSID(i);
+    if (ssid == WIFI_SSID) {
+      wifiSeenRssi = WiFi.RSSI(i);
+      wifiSeenChannel = WiFi.channel(i);
+    } else if (nearby < 4 && ssid.length() > 0) {
+      strlcpy(wifiNearby[nearby++], ssid.c_str(), sizeof(wifiNearby[0]));
+    }
+  }
+  WiFi.scanDelete();
+  wifiScanCount.store(n, std::memory_order_release);   // after every write above
+}
+
+/* Core 0. Brings up the camera, the stream server and Wi-Fi, then exits.
  * setup() has already made the effector safe and started the servos, and
  * loop() is running on core 1 while this works, so a slow or failed camera
  * never delays a status frame or the deadman. */
@@ -542,21 +577,74 @@ static void cameraTask(void*) {
   WiFi.setHostname(CAM_HOSTNAME);   // before mode(): applied when STA starts
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);             // modem sleep adds tens of ms per frame
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);   // non-blocking; loop() reports the IP
   cameraError = (int)startCamera();
   if (cameraError == ESP_OK) {
+    sensor_t* sensor = esp_camera_sensor_get();
+    cameraPid = sensor != nullptr ? sensor->id.PID : 0;
     startStreamServer();
     cameraState = 1;
   } else {
     cameraState = -1;
   }
+  WiFi.onEvent(onWifiDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  scanForHotspot();
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);   // non-blocking; loop() reports the IP
   vTaskDelete(nullptr);
 }
 
-/* loop(), core 1. Prints the stream URL whenever Wi-Fi gains an address. */
+/* ESP-IDF wifi_err_reason_t, by number so it builds on IDF 4.4 and 5.x. */
+static const char* wifiReasonText(int reason) {
+  switch (reason) {
+    case 0:   return "still connecting";
+    case 2:   return "authentication timed out: weak signal or wrong password";
+    case 15:
+    case 204: return "password rejected: check WIFI_PASSWORD, capitals included";
+    case 201: return "hotspot not found: set its band to 2.4 GHz and check WIFI_SSID";
+    case 202: return "authentication failed: wrong password, or a WPA3-only hotspot (use WPA2)";
+    case 203:
+    case 205: return "hotspot refused the connection: too many devices on it?";
+    case 210:
+    case 211: return "security mode not accepted: set the hotspot to WPA2";
+    default:  return "see the reason number";
+  }
+}
+
+/* loop(), core 1. Says once whether the boot scan heard the hotspot. */
+static void reportWifiScan(int networks) {
+  Serial.print("CAM wifi \"");
+  Serial.print(WIFI_SSID);
+  if (networks < 0) {
+    Serial.println("\": scan failed, joining anyway");
+  } else if (wifiSeenRssi != 0) {
+    Serial.print("\" heard on channel ");
+    Serial.print(wifiSeenChannel);
+    Serial.print(" at ");
+    Serial.print(wifiSeenRssi);
+    Serial.println(" dBm, joining");
+  } else {
+    Serial.print("\" NOT FOUND among ");
+    Serial.print(networks);
+    Serial.println(" networks: the S3 hears 2.4 GHz only (iPhone: Maximise"
+                   " Compatibility), and the name is case-sensitive");
+    if (wifiNearby[0][0] != '\0') {
+      Serial.print("CAM wifi heard instead:");
+      for (int i = 0; i < 4 && wifiNearby[i][0] != '\0'; ++i) {
+        Serial.print(" \"");
+        Serial.print(wifiNearby[i]);
+        Serial.print('"');
+      }
+      Serial.println();
+    }
+  }
+}
+
+/* loop(), core 1. Prints the stream URL whenever Wi-Fi gains an address, and
+ * while it has none, why not: once for the scan, then every 10 s. */
 static void announceCamera() {
   static unsigned long lastCheckMs = 0;
+  static unsigned long lastWifiNoteMs = 0;
   static int reportedState = 0;
+  static bool scanReported = false;
   static IPAddress announced;
   static bool mdnsStarted = false;
 
@@ -570,7 +658,18 @@ static void announceCamera() {
       Serial.print("CAM FAIL camera init error 0x");
       Serial.print(cameraError, HEX);
       Serial.println(" - check the ribbon and the PSRAM setting");
+    } else if (cameraState > 0) {
+      Serial.print("CAM camera ok, sensor 0x");
+      Serial.print(cameraPid, HEX);
+      Serial.println(psramFound() ? ", 640x480"
+                                  : ", 320x240 - no PSRAM: set Tools > PSRAM to OPI PSRAM");
     }
+  }
+  const int networks = wifiScanCount.load(std::memory_order_acquire);
+  if (!scanReported && networks != SCAN_PENDING) {
+    scanReported = true;
+    lastWifiNoteMs = now;
+    reportWifiScan(networks);
   }
   if (WiFi.status() == WL_CONNECTED) {
     const IPAddress ip = WiFi.localIP();
@@ -586,7 +685,16 @@ static void announceCamera() {
     }
   } else if (announced != IPAddress()) {
     announced = IPAddress();
+    lastWifiNoteMs = now;
     Serial.println("CAM wifi lost");
+  } else if (scanReported && now - lastWifiNoteMs >= 10000) {
+    lastWifiNoteMs = now;
+    const int reason = wifiDropReason;
+    Serial.print("CAM wifi not joined: ");
+    Serial.print(wifiReasonText(reason));
+    Serial.print(" (reason ");
+    Serial.print(reason);
+    Serial.println(")");
   }
 }
 #endif
@@ -617,7 +725,7 @@ void setup() {
 
   // Report PWM attach state at boot. A failed attach is otherwise invisible:
   // every command still succeeds, no pulses are ever emitted.
-  Serial.print("OK BOOT killswitch-actuator v3 pan_ch=");
+  Serial.print("OK BOOT killswitch-actuator v3.1 pan_ch=");
   Serial.print(panChannel);
   Serial.print(" tilt_ch=");
   Serial.print(tiltChannel);
