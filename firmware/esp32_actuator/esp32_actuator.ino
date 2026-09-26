@@ -25,21 +25,17 @@
  *          native USB-CDC. The bridge stays enumerated across ESP32 resets;
  *          native USB re-enumerates and the host's serial handle dies.
  *
- * CAMERA: the OV5640 on this board's camera connector streams MJPEG over Wi-Fi
- * (KS_CAMERA below). The connector uses the ESP32-S3-EYE layout, which puts
- * SIOC on GPIO 5, VSYNC on 6 and HREF on 7. The actuator used to sit on those
- * three pins, and HREF on the laser gate would pulse the effector at line rate,
- * so the actuator moved and a compile-time check refuses any overlap. Camera,
- * Wi-Fi and the stream server run on core 0; the safety loop runs on core 1
- * and shares nothing with them. See CLAUDE.md.
+ * NOT ON THIS BOARD: the camera. Vision runs on the host against a USB webcam.
+ * A DVP camera here would take GPIO 4-18 — including 5, 6 and 7 — and would put
+ * frame DMA on the processor that owns the deadman. See CLAUDE.md.
  *
  * Wiring:
- *   GPIO 14 -> Pan servo signal     (5V + GND from a SEPARATE supply)
- *   GPIO 21 -> Tilt servo signal    (common ground with the ESP32)
- *   GPIO 1  -> Effector gate        (1k -> 2N2222 base; collector sinks the
+ *   GPIO 5  -> Pan servo signal     (5V + GND from a SEPARATE supply)
+ *   GPIO 6  -> Tilt servo signal    (common ground with the ESP32)
+ *   GPIO 7  -> Effector gate        (1k -> 2N2222 base; collector sinks the
  *                                    KY-008 '-' terminal; 10k pulldown to GND)
  *
- * The 10k pulldown on GPIO 1 is mandatory. Between power-on and the first line
+ * The 10k pulldown on GPIO 7 is mandatory. Between power-on and the first line
  * of setup(), every ESP32 GPIO is a floating input. A floating gate is an
  * undefined effector state during boot, reflash, brownout and crash. Software
  * cannot fix this; the resistor can.
@@ -48,61 +44,9 @@
 #include <ESP32Servo.h>
 
 // ---------------------------------------------------------------- pins ----
-// Off GPIO 4-18: the camera connector owns those (see the header).
-static constexpr int PIN_SERVO_PAN  = 14;
-static constexpr int PIN_SERVO_TILT = 21;
-static constexpr int PIN_EFFECTOR   = 1;
-
-// 1 = stream the OV5640 over Wi-Fi. 0 = actuator only, as before.
-#ifndef KS_CAMERA
-#define KS_CAMERA 1
-#endif
-
-#if KS_CAMERA
-#include "esp_camera.h"
-#include "esp_http_server.h"
-#include <ESPmDNS.h>
-#include <WiFi.h>
-#if __has_include("wifi_secrets.h")
-#include "wifi_secrets.h"   // WIFI_SSID, WIFI_PASSWORD. Gitignored.
-#else
-#error "Copy wifi_secrets.example.h to wifi_secrets.h in this folder and put your hotspot name and password in it."
-#endif
-
-// ESP32-S3-EYE camera connector (Freenove ESP32-S3-WROOM CAM and its clones).
-// From Espressif's CameraWebServer camera_pins.h, CAMERA_MODEL_ESP32S3_EYE.
-static constexpr int CAM_PIN_XCLK  = 15;
-static constexpr int CAM_PIN_SIOD  = 4;
-static constexpr int CAM_PIN_SIOC  = 5;
-static constexpr int CAM_PIN_D0    = 11;
-static constexpr int CAM_PIN_D1    = 9;
-static constexpr int CAM_PIN_D2    = 8;
-static constexpr int CAM_PIN_D3    = 10;
-static constexpr int CAM_PIN_D4    = 12;
-static constexpr int CAM_PIN_D5    = 18;
-static constexpr int CAM_PIN_D6    = 17;
-static constexpr int CAM_PIN_D7    = 16;
-static constexpr int CAM_PIN_VSYNC = 6;
-static constexpr int CAM_PIN_HREF  = 7;
-static constexpr int CAM_PIN_PCLK  = 13;
-
-static constexpr int CAM_PINS[] = {
-  CAM_PIN_XCLK, CAM_PIN_SIOD, CAM_PIN_SIOC, CAM_PIN_D0, CAM_PIN_D1, CAM_PIN_D2,
-  CAM_PIN_D3, CAM_PIN_D4, CAM_PIN_D5, CAM_PIN_D6, CAM_PIN_D7, CAM_PIN_VSYNC,
-  CAM_PIN_HREF, CAM_PIN_PCLK,
-};
-static constexpr bool usesCameraPin(int pin, size_t i = 0) {
-  return i < sizeof(CAM_PINS) / sizeof(CAM_PINS[0]) &&
-         (CAM_PINS[i] == pin || usesCameraPin(pin, i + 1));
-}
-// A camera signal on an actuator pin drives it from the sensor, outside every
-// interlock in this file. Refuse to build rather than find out on the bench.
-static_assert(!usesCameraPin(PIN_EFFECTOR),   "effector gate shares a camera pin");
-static_assert(!usesCameraPin(PIN_SERVO_PAN),  "pan servo shares a camera pin");
-static_assert(!usesCameraPin(PIN_SERVO_TILT), "tilt servo shares a camera pin");
-
-static const char* CAM_HOSTNAME = "killswitch-cam";   // http://killswitch-cam.local/stream
-#endif
+static const int PIN_SERVO_PAN  = 5;
+static const int PIN_SERVO_TILT = 6;
+static const int PIN_EFFECTOR   = 7;
 
 // ------------------------------------------------------------ constants ----
 static const unsigned long BAUD               = 921600UL;
@@ -461,136 +405,6 @@ static void pumpSerial() {
   }
 }
 
-// --------------------------------------------------------------- camera ----
-#if KS_CAMERA
-// Written by the camera task (core 0), read by loop() (core 1). Only loop()
-// prints, so camera lines can never interleave with an ST frame on the UART.
-static volatile int  cameraState = 0;    // 0 starting, 1 streaming, -1 init failed
-static volatile int  cameraError = 0;
-static httpd_handle_t streamServer = nullptr;
-
-#define STREAM_BOUNDARY "killswitchframe"
-
-/* One MJPEG client at a time: the handler owns the server task while it
- * streams. Runs on the HTTP server task, pinned to core 0. */
-static esp_err_t streamHandler(httpd_req_t* req) {
-  httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=" STREAM_BOUNDARY);
-  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-  char part[96];
-  while (true) {
-    camera_fb_t* fb = esp_camera_fb_get();
-    if (fb == nullptr) {
-      vTaskDelay(pdMS_TO_TICKS(10));
-      continue;
-    }
-    const int headerLength = snprintf(
-        part, sizeof(part),
-        "\r\n--" STREAM_BOUNDARY "\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
-        (unsigned)fb->len);
-    esp_err_t res = httpd_resp_send_chunk(req, part, headerLength);
-    if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char*)fb->buf, fb->len);
-    esp_camera_fb_return(fb);
-    if (res != ESP_OK) return res;   // client went away
-  }
-}
-
-static esp_err_t startCamera() {
-  camera_config_t c = {};
-  // The servos own LEDC timers 0 and 1 (allocateTimer in setup). XCLK takes
-  // timer 3 and the last channel so it can never retime a servo.
-  c.ledc_timer   = LEDC_TIMER_3;
-  c.ledc_channel = LEDC_CHANNEL_7;
-  c.pin_d0 = CAM_PIN_D0;  c.pin_d1 = CAM_PIN_D1;  c.pin_d2 = CAM_PIN_D2;
-  c.pin_d3 = CAM_PIN_D3;  c.pin_d4 = CAM_PIN_D4;  c.pin_d5 = CAM_PIN_D5;
-  c.pin_d6 = CAM_PIN_D6;  c.pin_d7 = CAM_PIN_D7;
-  c.pin_xclk = CAM_PIN_XCLK;  c.pin_pclk = CAM_PIN_PCLK;
-  c.pin_vsync = CAM_PIN_VSYNC;  c.pin_href = CAM_PIN_HREF;
-  c.pin_sccb_sda = CAM_PIN_SIOD;  c.pin_sccb_scl = CAM_PIN_SIOC;
-  c.pin_pwdn = -1;  c.pin_reset = -1;
-  c.xclk_freq_hz = 20000000;
-  c.pixel_format = PIXFORMAT_JPEG;
-  c.grab_mode = CAMERA_GRAB_LATEST;   // never hand out a stale frame
-  if (psramFound()) {
-    c.frame_size = FRAMESIZE_VGA;  c.jpeg_quality = 12;
-    c.fb_count = 2;                c.fb_location = CAMERA_FB_IN_PSRAM;
-  } else {
-    c.frame_size = FRAMESIZE_QVGA; c.jpeg_quality = 12;
-    c.fb_count = 1;                c.fb_location = CAMERA_FB_IN_DRAM;
-  }
-  return esp_camera_init(&c);
-}
-
-static void startStreamServer() {
-  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.server_port = 80;
-  config.core_id = 0;               // keep the stream off the safety core
-  config.lru_purge_enable = true;   // a dead client frees its slot
-  httpd_uri_t stream = {};
-  stream.uri = "/stream";
-  stream.method = HTTP_GET;
-  stream.handler = streamHandler;
-  if (httpd_start(&streamServer, &config) == ESP_OK) {
-    httpd_register_uri_handler(streamServer, &stream);
-  }
-}
-
-/* Core 0. Brings up Wi-Fi, the camera and the stream server, then exits.
- * setup() has already made the effector safe and started the servos, and
- * loop() is running on core 1 while this works, so a slow or failed camera
- * never delays a status frame or the deadman. */
-static void cameraTask(void*) {
-  WiFi.setHostname(CAM_HOSTNAME);   // before mode(): applied when STA starts
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);             // modem sleep adds tens of ms per frame
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);   // non-blocking; loop() reports the IP
-  cameraError = (int)startCamera();
-  if (cameraError == ESP_OK) {
-    startStreamServer();
-    cameraState = 1;
-  } else {
-    cameraState = -1;
-  }
-  vTaskDelete(nullptr);
-}
-
-/* loop(), core 1. Prints the stream URL whenever Wi-Fi gains an address. */
-static void announceCamera() {
-  static unsigned long lastCheckMs = 0;
-  static int reportedState = 0;
-  static IPAddress announced;
-  static bool mdnsStarted = false;
-
-  const unsigned long now = millis();
-  if (now - lastCheckMs < 500) return;
-  lastCheckMs = now;
-
-  if (cameraState != reportedState) {
-    reportedState = cameraState;
-    if (cameraState < 0) {
-      Serial.print("CAM FAIL camera init error 0x");
-      Serial.print(cameraError, HEX);
-      Serial.println(" - check the ribbon and the PSRAM setting");
-    }
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    const IPAddress ip = WiFi.localIP();
-    if (ip != announced) {
-      announced = ip;
-      if (!mdnsStarted && MDNS.begin(CAM_HOSTNAME)) {
-        MDNS.addService("http", "tcp", 80);
-        mdnsStarted = true;
-      }
-      Serial.print("CAM http://");
-      Serial.print(ip);
-      Serial.println(cameraState > 0 ? "/stream" : "/stream (camera not ready)");
-    }
-  } else if (announced != IPAddress()) {
-    announced = IPAddress();
-    Serial.println("CAM wifi lost");
-  }
-}
-#endif
-
 // ---------------------------------------------------------------- entry ----
 
 void setup() {
@@ -617,7 +431,7 @@ void setup() {
 
   // Report PWM attach state at boot. A failed attach is otherwise invisible:
   // every command still succeeds, no pulses are ever emitted.
-  Serial.print("OK BOOT killswitch-actuator v3 pan_ch=");
+  Serial.print("OK BOOT killswitch-actuator v2 pan_ch=");
   Serial.print(panChannel);
   Serial.print(" tilt_ch=");
   Serial.print(tiltChannel);
@@ -626,11 +440,6 @@ void setup() {
   } else {
     Serial.println(" pwm=ok");
   }
-
-#if KS_CAMERA
-  // Only now, with the effector safe and the servos stowed. Core 0.
-  xTaskCreatePinnedToCore(cameraTask, "camera", 8192, nullptr, 1, nullptr, 0);
-#endif
 }
 
 void loop() {
@@ -639,7 +448,4 @@ void loop() {
   checkBurnCeiling();
   updateServos();
   sendStatus();
-#if KS_CAMERA
-  announceCamera();
-#endif
 }
