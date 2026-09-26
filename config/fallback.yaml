@@ -19,7 +19,7 @@ camera:
   # The firmware prints it on COM3 once Wi-Fi is up ("CAM http://.../stream"),
   # and main.py logs it. null = use the USB camera at device_index.
   # With the OV5640, re-measure horizontal_fov_deg above for that lens.
-  stream_url: null
+  stream_url: "http://10.244.153.41/stream"
   # If the gimbal turns AWAY from the target, flip that axis (stream only):
   # pan wrong -> flip_horizontal, tilt wrong -> flip_vertical.
   flip_horizontal: false
