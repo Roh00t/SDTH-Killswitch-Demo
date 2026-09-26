@@ -126,7 +126,7 @@ Accounting for beam divergence and 1D Fourier heat conduction, continuous track 
 
 | Function | GPIO | Notes |
 |---|---|---|
-| Servo PAN | 14 | Separate 5 V rail |
+| Servo PAN | 14 | Separate 5 V rail. The firmware mirrors pan (`PAN_REVERSED`) so a rising angle turns clockwise, matching the radar |
 | Servo TILT | 21 | Separate 5 V rail |
 | Effector gate | 1 | 1 kΩ → 2N2222 base; collector sinks KY-008 `−`; **10 kΩ pulldown to GND** |
 | Laser supply | 5V pin | KY-008 `S`; its middle pin stays unconnected. `S` on the collector with `−` on GND never lights, and `serial_probe` still passes |
