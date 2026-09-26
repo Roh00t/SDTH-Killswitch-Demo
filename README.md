@@ -1,7 +1,5 @@
 # Killswitch
-Get-Process python* | Stop-Process -Force
-start node:
-python main.py --config config/bench.yaml
+
 **A Software-Defined Directed Energy (SDDE) Counter-UAS node.**
 Singapore Defence Tech Hackathon
 
