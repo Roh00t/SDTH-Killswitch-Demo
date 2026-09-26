@@ -255,6 +255,9 @@ def interactive(port: str) -> int:
             except (ActuatorError, ValueError) as exc:
                 print(f"  error: {exc}")
         return 0
+    except ActuatorError as exc:   # connect() failed: one line, as run_checks prints it
+        print(f"\nACTUATOR ERROR: {exc}")
+        return 1
     finally:
         actuator.close()
 

@@ -235,3 +235,14 @@ class TestPortOpenError:
 
         message = port_open_error("COM9", FileNotFoundError("could not open port 'COM9'"))
         assert message == "Could not open COM9: could not open port 'COM9'"
+
+    def test_interactive_prints_one_line_instead_of_a_traceback(self, monkeypatch, capsys):
+        import tools.serial_probe as probe
+        from helper.hardware.actuator import SerialActuator
+
+        def taken(self):
+            raise ActuatorError("Could not open COM3: Access is denied. Another program has COM3 open")
+
+        monkeypatch.setattr(SerialActuator, "connect", taken)
+        assert probe.interactive("COM3") == 1
+        assert "ACTUATOR ERROR: Could not open COM3" in capsys.readouterr().out

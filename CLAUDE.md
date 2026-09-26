@@ -217,7 +217,7 @@ python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 331 tests, zero hardware
+pytest tests/ -q                                    # 332 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -323,7 +323,7 @@ a human reads.
 
 ## Testing
 
-331 tests, all hardware-free, ~2 s.
+332 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
