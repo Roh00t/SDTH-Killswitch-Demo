@@ -246,3 +246,65 @@ class TestPortOpenError:
         monkeypatch.setattr(SerialActuator, "connect", taken)
         assert probe.interactive("COM3") == 1
         assert "ACTUATOR ERROR: Could not open COM3" in capsys.readouterr().out
+
+
+class TestPanReversed:
+    """The rig's pan servo turns anticlockwise; the driver mirrors it both ways."""
+
+    class _Port:
+        def __init__(self, actuator, lines=()):
+            self.actuator, self.lines, self.written = actuator, list(lines), []
+
+        def write(self, payload):
+            self.written.append(payload)
+
+        def readline(self):
+            if self.lines:
+                return self.lines.pop(0)
+            self.actuator._running.clear()
+            return b""
+
+    def _actuator(self, reversed_, lines=()):
+        from helper.hardware.actuator import SerialActuator
+
+        act = SerialActuator("COM3", pan_reversed=reversed_)
+        act._serial = self._Port(act, lines)
+        return act
+
+    def test_mirror_keeps_stow_and_bounds(self):
+        from helper.hardware.actuator import mirror_pan
+
+        assert mirror_pan(45.0) == 135.0
+        assert mirror_pan(90.0) == 90.0
+        assert (mirror_pan(PAN_MIN_DEG), mirror_pan(PAN_MAX_DEG)) == (PAN_MAX_DEG, PAN_MIN_DEG)
+
+    def test_commands_go_out_mirrored_only_when_reversed(self):
+        straight, mirrored = self._actuator(False), self._actuator(True)
+        straight.set_angles(45.0, 97.0)
+        mirrored.set_angles(45.0, 97.0)
+        assert b"A045.0,097.0" in straight._serial.written[0]
+        assert b"A135.0,097.0" in mirrored._serial.written[0]
+
+    def test_out_of_range_is_clamped_before_mirroring(self):
+        act = self._actuator(True)
+        act.set_angles(999.0, -999.0)
+        assert b"A000.0,045.0" in act._serial.written[0]
+
+    def test_status_comes_back_in_the_hosts_sense(self):
+        act = self._actuator(True, [b"ST 135.0,97.0,0,0,1234\n"])
+        act._running.set()
+        act._reader_loop()
+        status = act.last_status()
+        assert (status.pan, status.tilt) == (45.0, 97.0)
+
+    def test_serial_probe_reads_the_same_setting(self, tmp_path):
+        from tools.serial_probe import load_pan_reversed
+
+        on = tmp_path / "on.yaml"
+        on.write_text("actuator:\n  pan_reversed: true\n")
+        off = tmp_path / "off.yaml"
+        off.write_text("actuator:\n  port: COM3\n")
+        assert load_pan_reversed(str(on)) is True
+        assert load_pan_reversed(str(off)) is False
+        assert load_pan_reversed(str(tmp_path / "missing.yaml")) is False
+        assert load_pan_reversed("config/fallback.yaml") is True

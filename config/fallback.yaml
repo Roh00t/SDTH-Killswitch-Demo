@@ -137,6 +137,12 @@ actuator:
   connect_timeout_s: 6.0
   stow_pan_deg: 90.0
   stow_tilt_deg: 90.0
+  # The rig's pan SG90 turns ANTICLOCKWISE (seen from above) as its angle rises;
+  # the cue geometry, the dashboard radar and the control law all mean
+  # CLOCKWISE. true mirrors pan in the serial driver, both ways, so the laptop
+  # fixes it and the firmware is untouched. serial_probe reads this key too.
+  # After changing it, redo the target tape mark: pan 45 points the other way.
+  pan_reversed: true
 
 c2:
   broker_host: "localhost"

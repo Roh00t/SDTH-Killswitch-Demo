@@ -29,7 +29,7 @@ machine, or MQTT input handling are safety-critical.
 |---|---|---|
 | Host | Laptop/PC — Windows demo box, macOS dev | — |
 | Edge actuator | ESP32-S3-N16R8 (16 MB flash, 8 MB PSRAM) | CH343 USB-UART @921600, `COM3` |
-| Gimbal | 2× SG90, separate 5 V rail | pan GPIO 14 / tilt GPIO 21 |
+| Gimbal | 2× SG90, separate 5 V rail | pan GPIO 14 / tilt GPIO 21. The pan servo turns anticlockwise as its angle rises; `actuator.pan_reversed: true` mirrors it in `SerialActuator`, both ways, so everything above the driver means clockwise. Firmware untouched |
 | Effector | KY-008 650 nm laser module, low-side switched | GPIO 1 → 1 kΩ → 2N2222 base, 10 kΩ pulldown; KY-008 `S` → board 5V pin, `−` → collector |
 | Camera | OV5640 on the ESP32-S3's camera connector (ESP32-S3-EYE layout), MJPEG over Wi-Fi | GPIO 4–13, 15–18; host reads `camera.stream_url` |
 
@@ -217,7 +217,7 @@ python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 332 tests, zero hardware
+pytest tests/ -q                                    # 337 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -323,13 +323,13 @@ a human reads.
 
 ## Testing
 
-332 tests, all hardware-free, ~2 s.
+337 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
 | `test_aimpoint.py` | Offset math, clamping, resolution gate, target selection |
 | `test_comms.py` | Payload validation, hostile inputs, token handling, operator task parser |
-| `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop, held-port hint |
+| `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop, held-port hint, pan reversal both ways |
 | `test_state_machine.py` | Transition table, sweep bounds, step-and-stare scan, cue geometry, prediction, auth-window telemetry, forced-IDLE safing, stale-auth drain |
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
 | `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket, dashboard opens itself from disk, dashboard NO LINK, strict-JSON frames, operator tasking and topic routing |

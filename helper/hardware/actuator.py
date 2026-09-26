@@ -18,6 +18,8 @@ from helper.hardware.protocol import (
     BOOT_SETTLE_S,
     CONNECT_TIMEOUT_S,
     HEARTBEAT_INTERVAL_S,
+    PAN_MAX_DEG,
+    PAN_MIN_DEG,
     ActuatorStatus,
     clamp_pan,
     clamp_tilt,
@@ -25,6 +27,15 @@ from helper.hardware.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def mirror_pan(angle: float) -> float:
+    """The same pan angle for a servo that turns the other way.
+
+    The pan limits are symmetric about their centre, so a clamped angle stays
+    inside them and stow (90) maps to itself.
+    """
+    return PAN_MIN_DEG + PAN_MAX_DEG - angle
 
 
 class ActuatorError(RuntimeError):
@@ -178,6 +189,7 @@ class SerialActuator(ActuatorDriver):
         baud: int = BAUD_RATE,
         connect_timeout: float = CONNECT_TIMEOUT_S,
         boot_settle_s: float = BOOT_SETTLE_S,
+        pan_reversed: bool = False,
     ) -> None:
         """Configure the link. Does not open it; call `connect()`.
 
@@ -191,8 +203,16 @@ class SerialActuator(ActuatorDriver):
                 board boots slowly: the reset is what guarantees a known state.
             boot_settle_s: Seconds to wait out the DTR-triggered ESP32 reset
                 before reading the boot banner.
+            pan_reversed: The pan servo turns anticlockwise (seen from above)
+                as its angle rises, against the clockwise sense the cue
+                geometry, the dashboard radar and the control law all use.
+                Pan is mirrored on the way out and mirrored back in every
+                status frame, so nothing above this driver sees the servo's
+                own sense. Bounds hold: they are clamped before mirroring, and
+                the firmware clamps again.
         """
         self._port_name = port
+        self._pan_reversed = pan_reversed
         self._baud = baud
         self._connect_timeout = connect_timeout
         self._boot_settle_s = boot_settle_s
@@ -334,6 +354,12 @@ class SerialActuator(ActuatorDriver):
 
             status = ActuatorStatus.parse(line, time.monotonic())
             if status is not None:
+                if self._pan_reversed:
+                    status = ActuatorStatus(
+                        pan=mirror_pan(status.pan), tilt=status.tilt,
+                        laser_on=status.laser_on, armed=status.armed,
+                        uptime_ms=status.uptime_ms, received_at=status.received_at,
+                    )
                 with self._state_lock:
                     self._last_status = status
                     self._armed = status.armed
@@ -375,6 +401,8 @@ class SerialActuator(ActuatorDriver):
     def set_angles(self, pan_deg: float, tilt_deg: float) -> None:
         """Command absolute angles, clamped host-side. See ActuatorDriver."""
         pan, tilt = clamp_pan(pan_deg), clamp_tilt(tilt_deg)
+        if self._pan_reversed:
+            pan = mirror_pan(pan)
         self._write(frame(f"A{pan:05.1f},{tilt:05.1f}"))
 
     def arm(self) -> None:

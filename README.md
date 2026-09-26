@@ -126,7 +126,7 @@ Accounting for beam divergence and 1D Fourier heat conduction, continuous track 
 
 | Function | GPIO | Notes |
 |---|---|---|
-| Servo PAN | 14 | Separate 5 V rail |
+| Servo PAN | 14 | Separate 5 V rail. This rig's servo turns the other way: `actuator.pan_reversed: true` mirrors it on the laptop side |
 | Servo TILT | 21 | Separate 5 V rail |
 | Effector gate | 1 | 1 kΩ → 2N2222 base; collector sinks KY-008 `−`; **10 kΩ pulldown to GND** |
 | Laser supply | 5V pin | KY-008 `S`; its middle pin stays unconnected. `S` on the collector with `−` on GND never lights, and `serial_probe` still passes |
@@ -240,7 +240,7 @@ python -m tools.operator_console
 **Tests:**
 
 ```bash
-pytest tests/ -q        # 332 tests, zero hardware, ~7s
+pytest tests/ -q        # 337 tests, zero hardware, ~7s
 ```
 
 ---

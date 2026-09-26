@@ -16,6 +16,8 @@ import logging
 import sys
 import time
 
+import yaml
+
 from helper.hardware.actuator import ActuatorError, SerialActuator, resolve_port
 from helper.hardware.protocol import BAUD_RATE
 
@@ -36,9 +38,23 @@ def list_ports() -> int:
     return 0
 
 
-def run_checks(port: str) -> int:
+def load_pan_reversed(path: str) -> bool:
+    """`actuator.pan_reversed` from a node config; False when unset or unreadable.
+
+    The probe must mirror pan exactly as the node does, or `a 45 97` marks a
+    target spot on the opposite side from where the node will look.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+    except (OSError, yaml.YAMLError):
+        return False
+    return bool((config.get("actuator") or {}).get("pan_reversed", False))
+
+
+def run_checks(port: str, pan_reversed: bool = False) -> int:
     """Exercise every firmware interlock and report pass/fail."""
-    actuator = SerialActuator(port, baud=BAUD_RATE)
+    actuator = SerialActuator(port, baud=BAUD_RATE, pan_reversed=pan_reversed)
     passed, failed = 0, 0
 
     def check(label: str, condition: bool, detail: str = "") -> None:
@@ -136,14 +152,14 @@ def run_checks(port: str) -> int:
         actuator.close()
 
 
-def servo_sweep(port: str) -> int:
+def servo_sweep(port: str, pan_reversed: bool = False) -> int:
     """Large, slow, obvious movements. YOU are the sensor here.
 
     SG90s report nothing, so the only way to confirm the gimbal physically
     moves is to watch it. This isolates each axis so a wiring or power fault
     points at one servo rather than the whole rig.
     """
-    actuator = SerialActuator(port, baud=BAUD_RATE)
+    actuator = SerialActuator(port, baud=BAUD_RATE, pan_reversed=pan_reversed)
     try:
         actuator.connect()
         print("\nWatch the gimbal. Each move is deliberately large and slow.\n")
@@ -208,9 +224,9 @@ Movement is jerky or it jumps to an end stop and sticks
         actuator.close()
 
 
-def interactive(port: str) -> int:
+def interactive(port: str, pan_reversed: bool = False) -> int:
     """Manual command shell. Type raw protocol bodies; 'q' exits."""
-    actuator = SerialActuator(port, baud=BAUD_RATE)
+    actuator = SerialActuator(port, baud=BAUD_RATE, pan_reversed=pan_reversed)
     try:
         actuator.connect()
         print("\nCommands:")
@@ -269,6 +285,8 @@ def main() -> int:
     parser.add_argument("--interactive", action="store_true", help="Manual shell")
     parser.add_argument("--servo-sweep", action="store_true",
                         help="Large slow movements to confirm the gimbal physically moves")
+    parser.add_argument("--config", default="config/fallback.yaml",
+                        help="Node config; only actuator.pan_reversed is read")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -288,9 +306,14 @@ def main() -> int:
             print(f"\n{exc}\n")
             return list_ports()
 
+    pan_reversed = load_pan_reversed(args.config)
+    if pan_reversed:
+        print(f"Pan mirrored: actuator.pan_reversed is true in {args.config}")
     if args.servo_sweep:
-        return servo_sweep(port)
-    return interactive(port) if args.interactive else run_checks(port)
+        return servo_sweep(port, pan_reversed)
+    if args.interactive:
+        return interactive(port, pan_reversed)
+    return run_checks(port, pan_reversed)
 
 
 if __name__ == "__main__":

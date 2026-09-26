@@ -19,7 +19,7 @@ camera:
   # The firmware prints it on COM3 once Wi-Fi is up ("CAM http://.../stream"),
   # and main.py logs it. null = use the USB camera at device_index.
   # With the OV5640, re-measure horizontal_fov_deg above for that lens.
-  stream_url: null
+  stream_url: "http://10.244.153.41/stream"
   # If the gimbal turns AWAY from the target, flip that axis (stream only):
   # pan wrong -> flip_horizontal, tilt wrong -> flip_vertical.
   flip_horizontal: false
@@ -115,6 +115,12 @@ actuator:
   connect_timeout_s: 6.0
   stow_pan_deg: 90.0
   stow_tilt_deg: 90.0
+  # The rig's pan SG90 turns ANTICLOCKWISE (seen from above) as its angle rises;
+  # the cue geometry, the dashboard radar and the control law all mean
+  # CLOCKWISE. true mirrors pan in the serial driver, both ways, so the laptop
+  # fixes it and the firmware is untouched. serial_probe reads this key too.
+  # After changing it, redo the target tape mark: pan 45 points the other way.
+  pan_reversed: true
 
 c2:
   broker_host: "localhost"
