@@ -4,6 +4,7 @@ from __future__ import annotations
 import socket
 from pathlib import Path
 
+import pytest
 import yaml
 
 import tools.camera_probe as camera_probe
@@ -157,3 +158,17 @@ class TestFindCamera:
         assert camera_probe.run_find(str(tmp_path / "c.yaml"), write=True) == 1
         out = capsys.readouterr().out
         assert "NOT FOUND" in out and "172.20.10.1 (busy)" in out and "2.4 GHz" in out
+
+    def test_run_find_confirms_a_bare_configured_address_without_scanning(
+            self, tmp_path, monkeypatch):
+        # The rig's config held "10.244.153.41": no scheme, no path.
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text('camera:\n  stream_url: "10.244.153.41"\n')
+        probed = []
+        monkeypatch.setattr(camera_probe, "probe_host",
+                            lambda host: probed.append(host) or "killswitch")
+        monkeypatch.setattr(camera_probe, "find_camera",
+                            lambda hosts: pytest.fail("scanned although the config was right"))
+        assert camera_probe.run_find(str(cfg), write=True) == 0
+        assert probed == ["10.244.153.41"]
+        assert load_stream_url(str(cfg)) == "http://10.244.153.41/stream"

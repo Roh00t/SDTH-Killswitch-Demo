@@ -28,6 +28,7 @@ import socket
 import sys
 import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Sequence, Tuple
 
@@ -145,6 +146,9 @@ STREAM_BOUNDARY = "killswitchframe"
 FIND_HINTS = [
     "  - The laptop and the ESP32 must be on the same hotspot. The ESP32-S3 hears",
     "    2.4 GHz only (Android: hotspot band 2.4 GHz; iPhone: Maximise Compatibility).",
+    "  - Only this laptop's /24 was scanned. On a large network (campus or venue",
+    "    Wi-Fi) the camera can sit elsewhere, and client isolation blocks it outright:",
+    "    use a phone hotspot for both.",
     "  - Firmware v3.1 says why Wi-Fi failed: Arduino Serial Monitor at 921600,",
     "    press RST on the board, and read the 'CAM wifi ...' lines.",
 ]
@@ -295,14 +299,24 @@ def write_stream_url(path: str, url: str) -> bool:
 
 def run_find(config_path: str, write: bool) -> int:
     """Find the camera by name, else by scanning, and report or write its URL."""
+    from helper.vision.frame_source import normalize_stream_url
+
     print("Looking for the Killswitch camera...")
     host: Optional[str] = None
     others: List[str] = []
-    named = resolve_with_timeout(CAMERA_MDNS_NAME)
-    if named is not None:
-        print(f"  {CAMERA_MDNS_NAME} -> {named}")
-        if probe_host(named) == "killswitch":
-            host = named
+    configured = load_stream_url(config_path)
+    if configured is not None:
+        known = urllib.parse.urlsplit(normalize_stream_url(configured)).hostname
+        kind = probe_host(known) if known else None
+        print(f"  camera.stream_url {configured!r} -> {kind or 'no answer'}")
+        if kind == "killswitch":
+            host = known
+    if host is None:
+        named = resolve_with_timeout(CAMERA_MDNS_NAME)
+        if named is not None:
+            print(f"  {CAMERA_MDNS_NAME} -> {named}")
+            if probe_host(named) == "killswitch":
+                host = named
     if host is None:
         own = local_ipv4s()
         if not own:

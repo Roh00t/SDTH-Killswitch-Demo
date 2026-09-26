@@ -216,7 +216,7 @@ python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 306 tests, zero hardware
+pytest tests/ -q                                    # 317 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -319,7 +319,7 @@ a human reads.
 
 ## Testing
 
-306 tests, all hardware-free, ~2 s.
+317 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
@@ -330,7 +330,7 @@ a human reads.
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
 | `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket, dashboard NO LINK, strict-JSON frames, operator tasking and topic routing |
 | `test_camera_probe.py` | Configured camera index FOUND / NOT FOUND, per-OS no-camera hints, `--find` against the firmware's stream format, `--write` keeping every comment |
-| `test_stream_source.py` | Wi-Fi camera: newest frame, reconnect, unhealthy on loss, flip, real MJPEG decode of the firmware's format |
+| `test_stream_source.py` | Wi-Fi camera: newest frame, reconnect, unhealthy on loss, flip, bare-address completion, real MJPEG decode of the firmware's format |
 | `test_sim_scene.py` | `--sim-target` scene: refuses a real actuator, closes the loop, fresh ids on reset |
 
 **Unit tests are necessary but not sufficient.** Five real bugs were found only by running

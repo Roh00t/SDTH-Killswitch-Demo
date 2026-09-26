@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 import pytest
 
-from helper.vision.frame_source import HttpStreamSource
+from helper.vision.frame_source import HttpStreamSource, normalize_stream_url
 
 BOUNDARY = "killswitchframe"   # firmware/esp32_actuator STREAM_BOUNDARY
 
@@ -140,6 +140,38 @@ class TestWithFakes:
         try:
             frame, _ = src.read()
             assert frame[10, bright_col].tolist() == [255, 255, 255]
+        finally:
+            src.stop()
+
+
+class TestNormalizeStreamUrl:
+    """A hand-typed address must not reach FFmpeg as a file path."""
+
+    @pytest.mark.parametrize("typed, opened", [
+        ("10.244.153.41", "http://10.244.153.41/stream"),
+        (" 10.244.153.41 ", "http://10.244.153.41/stream"),
+        ("http://10.244.153.41", "http://10.244.153.41/stream"),
+        ("http://10.244.153.41/", "http://10.244.153.41/stream"),
+        ("10.244.153.41/stream", "http://10.244.153.41/stream"),
+        ("killswitch-cam.local", "http://killswitch-cam.local/stream"),
+        ("http://10.244.153.41/stream", "http://10.244.153.41/stream"),
+        ("http://10.244.153.41:81/stream", "http://10.244.153.41:81/stream"),
+        ("rtsp://10.0.0.5/live", "rtsp://10.0.0.5/live"),
+    ])
+    def test_completes_only_what_is_missing(self, typed, opened):
+        assert normalize_stream_url(typed) == opened
+
+    def test_the_source_opens_the_completed_url(self):
+        opened = []
+
+        def factory(url):
+            opened.append(url)
+            return FakeCapture(10_000)
+
+        src = HttpStreamSource("10.244.153.41", capture_factory=factory)
+        src.start()
+        try:
+            assert opened[0] == "http://10.244.153.41/stream"
         finally:
             src.stop()
 

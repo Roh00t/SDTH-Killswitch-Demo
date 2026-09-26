@@ -13,6 +13,7 @@ import logging
 import platform
 import threading
 import time
+import urllib.parse
 from abc import ABC, abstractmethod
 from typing import Callable, Optional, Tuple
 
@@ -238,6 +239,30 @@ class UsbCameraSource(FrameSource):
         return self._running.is_set()
 
 
+def normalize_stream_url(value: str) -> str:
+    """Complete a hand-typed camera address into the firmware's stream URL.
+
+    The firmware serves one thing, ``http://<ip>/stream``. A bare
+    ``10.244.153.41`` in the config otherwise reaches FFmpeg as a file path and
+    fails as "no frames", which reads like a dead camera. Adds a missing
+    ``http://`` and a missing path; leaves a URL with its own path, port or
+    scheme alone.
+
+    Args:
+        value: What the config holds.
+
+    Returns:
+        The URL to open.
+    """
+    text = value.strip()
+    if "://" not in text:
+        text = "http://" + text
+    parts = urllib.parse.urlsplit(text)
+    if parts.scheme in ("http", "https") and parts.path in ("", "/"):
+        text = urllib.parse.urlunsplit(parts._replace(path="/stream"))
+    return text
+
+
 def _open_http_capture(url: str, open_timeout_s: float, read_timeout_s: float) -> cv2.VideoCapture:
     """Open an MJPEG-over-HTTP stream with FFmpeg, with bounded open and read waits.
 
@@ -287,7 +312,8 @@ class HttpStreamSource(FrameSource):
         """Configure the stream.
 
         Args:
-            url: Stream URL, e.g. ``http://192.168.43.50/stream``.
+            url: Stream URL, e.g. ``http://192.168.43.50/stream``. A bare
+                address is completed by ``normalize_stream_url``, with a warning.
             open_timeout_s: Bound on connecting.
             read_timeout_s: Bound on waiting for one frame.
             reconnect_window_s: How long without a frame, reconnecting, before
@@ -300,7 +326,9 @@ class HttpStreamSource(FrameSource):
             capture_factory: Opens a capture for a URL. Tests inject a fake;
                 the default is FFmpeg with the two timeouts above.
         """
-        self._url = url
+        self._url = normalize_stream_url(url)
+        if self._url != url:
+            logger.warning("camera.stream_url %r is not a full URL; using %s", url, self._url)
         self._reconnect_window_s = reconnect_window_s
         # cv2.flip codes: 1 horizontal, 0 vertical, -1 both; None = no flip.
         self._flip_code: Optional[int] = (
