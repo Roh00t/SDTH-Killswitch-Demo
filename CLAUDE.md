@@ -216,7 +216,7 @@ python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 324 tests, zero hardware
+pytest tests/ -q                                    # 329 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -264,7 +264,10 @@ Not style preferences — each one has a real bug behind it.
 11. **The control law steps only on a NEW observation.** `_drive_to_target` gates on
     `TrackSnapshot.frame_id`. The tick runs at 100 Hz; the model delivers ~4.6 fps.
     Without the gate the same stale error is re-applied ~20x per frame and the gimbal
-    winds up. A feedback loop may only step when its feedback is new.
+    winds up. A feedback loop may only step when its feedback is new. SCAN obeys the
+   same rule: the sweep moves, stops, and steps again only after `scan.looks_per_stop`
+   frames captured `scan.settle_s` after the move came back without a target. It used
+   to step every tick, 400 deg/s, and the camera only ever saw smear.
 
 12. **`imgsz` in config must match the export.** `model/best.onnx` is fixed-shape at
     1024x1024 (`dynamic: False`). Ultralytics **silently overrides** any other value, so
@@ -319,14 +322,14 @@ a human reads.
 
 ## Testing
 
-324 tests, all hardware-free, ~2 s.
+329 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
 | `test_aimpoint.py` | Offset math, clamping, resolution gate, target selection |
 | `test_comms.py` | Payload validation, hostile inputs, token handling, operator task parser |
 | `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop |
-| `test_state_machine.py` | Transition table, sweep bounds, cue geometry, prediction, auth-window telemetry, forced-IDLE safing, stale-auth drain |
+| `test_state_machine.py` | Transition table, sweep bounds, step-and-stare scan, cue geometry, prediction, auth-window telemetry, forced-IDLE safing, stale-auth drain |
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
 | `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket, dashboard opens itself from disk, dashboard NO LINK, strict-JSON frames, operator tasking and topic routing |
 | `test_camera_probe.py` | Configured camera index FOUND / NOT FOUND, per-OS no-camera hints, `--find` against the firmware's stream format, `--write` keeping every comment |

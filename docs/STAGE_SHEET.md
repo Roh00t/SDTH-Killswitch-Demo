@@ -78,6 +78,8 @@ in `helper/state/control.py`.
 | Overshoots and hunts around the target | `proportional_gain` | 0.6 → 0.45 | Above 1.0: SG90s go under-damped |
 | Sluggish; HOLD never latches on a moving target | First check `camera.horizontal_fov_deg`, then `proportional_gain` | 0.6 → 0.75 | Raising P "for jitter": it makes jitter worse |
 | Big jump on acquisition | `max_step_deg` | 6 → 4 | — |
+| SCAN passes the target without locking | `scan.settle_s` | 0.5 → 0.8 (slow Wi-Fi) | Below 0.3: the frame can still show the previous view |
+| SCAN too slow to find an off-cue target | `scan.looks_per_stop` | 2 → 1 | Raising `pan_step_deg` past the camera's FOV: gaps in the search |
 
 ## T-5: start order
 

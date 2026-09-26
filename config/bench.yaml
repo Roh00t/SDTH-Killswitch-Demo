@@ -80,8 +80,16 @@ engagement:
   burn_duration_s: 1.8
 
 scan:
-  pan_step_deg: 4.0
-  tilt_step_deg: 8.0
+  # One stop per step: with a ~65 deg camera, 20 deg steps overlap each view
+  # by about two thirds. 4 deg made sense only while the sweep never stopped.
+  pan_step_deg: 20.0
+  tilt_step_deg: 20.0
+  # Step-and-stare. After each move the gimbal holds still until this many
+  # frames, captured at least settle_s after the move, have been through the
+  # detector. settle_s covers servo travel plus the Wi-Fi camera's delay
+  # (~100-200 ms); a frame sooner than that can show the old view or smear.
+  settle_s: 0.5
+  looks_per_stop: 2
   max_cycles: 2
   # Azimuth the gimbal faces at pan centre. Cues outside +/-90 of this are
   # rejected, not clamped.

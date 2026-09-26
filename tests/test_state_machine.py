@@ -436,3 +436,66 @@ class TestFailSafeGaps:
                             token="sdth-demo-token", nonce="in-window")
         node._c2.inject(auth)
         assert node._c2.poll() == auth
+
+
+class TestStepAndStare:
+    """SCAN moves, stops and looks. It used to step every 10 ms tick (400 deg/s)."""
+
+    @staticmethod
+    def _scanning():
+        node = TestFailSafeGaps._node()
+        advance(node._machine, S.SCAN)
+        node._sweep.reset(45.0, 97.0)
+        node._stare_at(45.0, 97.0)
+        return node
+
+    @staticmethod
+    def _look(node, frame_id, after_settle=True):
+        from helper.state.machine import TrackSnapshot
+
+        settle = node._cfg["scan"]["settle_s"]
+        captured = node._stare_since + (settle + 0.01 if after_settle else settle / 2)
+        node._snapshots.publish(TrackSnapshot(
+            frame_id=frame_id, captured_at=captured, processed_at=captured + 0.05))
+
+    def test_holds_still_until_it_has_looked(self):
+        node = self._scanning()
+        for _ in range(50):                    # half a second of ticks, no frames
+            node._tick_scan()
+        assert (node._actuator.pan, node._actuator.tilt) == (45.0, 97.0)
+
+    def test_frames_from_before_the_gimbal_settled_do_not_count(self):
+        node = self._scanning()
+        for frame_id in range(1, 6):
+            self._look(node, frame_id, after_settle=False)
+            node._tick_scan()
+        assert node._actuator.pan == 45.0
+
+    def test_the_same_frame_counts_once(self):
+        node = self._scanning()
+        self._look(node, 1)
+        for _ in range(10):
+            node._tick_scan()
+        assert node._actuator.pan == 45.0
+
+    def test_moves_one_step_after_enough_settled_looks_then_stops_again(self):
+        node = self._scanning()
+        step = node._cfg["scan"]["pan_step_deg"]
+        for frame_id in range(1, node._cfg["scan"]["looks_per_stop"] + 1):
+            self._look(node, frame_id)
+            node._tick_scan()
+        assert node._actuator.pan == 45.0 + step
+        for _ in range(20):                    # a new stop: no new looks yet
+            node._tick_scan()
+        assert node._actuator.pan == 45.0 + step
+
+    def test_a_target_seen_while_looking_starts_track(self):
+        from helper.state.machine import TrackSnapshot
+
+        node = self._scanning()
+        target = det(320, 240)
+        node._snapshots.publish(TrackSnapshot(
+            frame_id=1, captured_at=node._stare_since + 0.6, processed_at=node._stare_since + 0.65,
+            detections=(target,), target=target))
+        node._tick_scan()
+        assert node._machine.state is S.TRACK

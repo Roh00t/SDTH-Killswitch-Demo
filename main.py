@@ -153,6 +153,11 @@ class KillswitchNode:
         self._gimbal_rate: Tuple[float, float] = (0.0, 0.0)
         self._last_command_at: Optional[float] = None
         self._last_acted_frame_id: int = -1
+        # Step-and-stare search: where the current stop began and how many
+        # settled frames have been looked at there. Tick thread only.
+        self._stare_since: float = 0.0
+        self._stare_looks: int = 0
+        self._stare_last_frame_id: int = -1
         # True once the actuator has been made safe for the current IDLE. Read
         # and written only on the tick thread, so it is not a cross-thread
         # handoff (rule 3). Starts True: the firmware boots de-energised,
@@ -556,14 +561,22 @@ class KillswitchNode:
         pan, tilt = gimbal
         self._active_target_id = message.target_id
         self._sweep.reset(pan, tilt)
-        self._command_gimbal(pan, tilt)
+        self._stare_at(pan, tilt)
         self._machine.transition_to(
             EngagementState.SCAN,
             f"cue {message.target_id} az={message.azimuth:.1f} el={message.elevation:.1f}",
         )
 
     def _tick_scan(self) -> None:
-        """Sweep the cued volume looking for a visual lock."""
+        """Search the cued volume step by step: move, stop, look, move on.
+
+        The sweep used to advance one step per tick. At 100 Hz that commanded
+        400 deg/s, faster than an SG90 slews and far faster than the Wi-Fi
+        camera and the detector can look, so the camera saw smear and the
+        gimbal never stopped. Now a stop ends only once `scan.looks_per_stop`
+        frames captured at least `scan.settle_s` after the move have been
+        through the detector without a target. The first stop is the cue.
+        """
         snapshot = self._snapshots.latest()
         if snapshot is not None and snapshot.has_target:
             self._begin_track(snapshot)
@@ -576,8 +589,26 @@ class KillswitchNode:
             self._enter_idle(f"search volume covered {self._sweep.cycles_completed}x")
             return
 
-        pan, tilt = self._sweep.step()
+        scan = self._cfg["scan"]
+        if (snapshot is not None
+                and snapshot.frame_id != self._stare_last_frame_id
+                and snapshot.captured_at >= self._stare_since + scan["settle_s"]):
+            self._stare_last_frame_id = snapshot.frame_id
+            self._stare_looks += 1
+        if self._stare_looks < scan["looks_per_stop"]:
+            return          # still looking here; the gimbal holds still
+        self._stare_at(*self._sweep.step())
+
+    def _stare_at(self, pan: float, tilt: float) -> None:
+        """Move to a search stop and start counting looks there. Tick thread."""
         self._command_gimbal(pan, tilt)
+        self._restart_stare()
+
+    def _restart_stare(self) -> None:
+        """Count looks afresh from now, at wherever the gimbal is. Tick thread."""
+        self._stare_since = time.monotonic()
+        self._stare_looks = 0
+        self._stare_last_frame_id = -1
 
     def _tick_track(self) -> None:
         """Drive the aimpoint to boresight."""
@@ -715,6 +746,8 @@ class KillswitchNode:
                 if self._machine.state is not EngagementState.SCAN:
                     self._predictor.reset()
                     self._hold_started_at = None
+                    # Look where the target was last seen before sweeping on.
+                    self._restart_stare()
                     self._machine.transition_to(
                         EngagementState.SCAN, "target lost, reacquiring"
                     )
