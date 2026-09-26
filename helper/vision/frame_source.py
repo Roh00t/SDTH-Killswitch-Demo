@@ -367,9 +367,11 @@ class HttpStreamSource(FrameSource):
             if cap is not None:
                 cap.release()
             raise RuntimeError(
-                f"No frames from camera stream {self._url}. Open it in a browser on "
-                f"this laptop; if that fails too, the ESP32 is not on this network. "
-                f"Run 'python -m tools.camera_probe --config <your config>'."
+                f"No frames from camera stream {self._url}. It serves ONE viewer: "
+                f"close any browser tab or other program showing it. Still nothing: "
+                f"press RST on the ESP32, wait 10 s and retry. If a browser on this "
+                f"laptop can't show it either, run 'python -m tools.camera_probe "
+                f"--config <your config> --find --write'."
             )
         self._actual_size = (probe.shape[1], probe.shape[0])
         probe = self._oriented(probe)

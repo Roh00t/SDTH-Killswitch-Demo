@@ -75,7 +75,7 @@ class TestWithFakes:
     def test_no_stream_fails_start_with_a_useful_message(self):
         src = HttpStreamSource("http://cam/stream",
                                capture_factory=lambda url: FakeCapture(0, opened=False))
-        with pytest.raises(RuntimeError, match="Open it in a browser"):
+        with pytest.raises(RuntimeError, match="ONE viewer"):
             src.start()
 
     def test_a_drop_reconnects_and_stays_healthy(self):

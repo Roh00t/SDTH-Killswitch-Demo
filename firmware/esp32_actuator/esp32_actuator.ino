@@ -469,7 +469,12 @@ static void pumpSerial() {
 static volatile int  cameraState = 0;    // 0 starting, 1 streaming, -1 init failed
 static volatile int  cameraError = 0;
 static volatile int  cameraPid   = 0;    // sensor product id: 0x5640 on an OV5640
+static volatile int  cameraStalls = 0;   // sensor went silent; camera restarted
 static httpd_handle_t streamServer = nullptr;
+
+// No frame for this long while a viewer is connected: the sensor has stalled.
+static constexpr uint32_t STREAM_STALL_MS = 3000;
+static esp_err_t startCamera();
 
 // Wi-Fi diagnostics, same rule: core 0 writes, loop() prints. Without them a
 // hotspot that refuses the board looks exactly like a URL that scrolled past.
@@ -483,17 +488,33 @@ static volatile int  wifiDropReason  = 0;    // last STA_DISCONNECTED reason
 #define STREAM_BOUNDARY "killswitchframe"
 
 /* One MJPEG client at a time: the handler owns the server task while it
- * streams. Runs on the HTTP server task, pinned to core 0. */
+ * streams. Runs on the HTTP server task, pinned to core 0.
+ *
+ * A viewer's departure is only noticed when a send fails, and nothing is sent
+ * while the sensor is silent. Waiting for frames forever therefore held the
+ * server's only task for good, and every later viewer hung: on the rig, 20
+ * minutes of timeouts with the board still up. After STREAM_STALL_MS without
+ * a frame the handler hangs up and restarts the camera for the next viewer. */
 static esp_err_t streamHandler(httpd_req_t* req) {
   httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=" STREAM_BOUNDARY);
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   char part[96];
+  uint32_t lastFrameMs = millis();
   while (true) {
-    camera_fb_t* fb = esp_camera_fb_get();
+    camera_fb_t* fb = esp_camera_fb_get();   // itself waits up to ~4 s
     if (fb == nullptr) {
+      if (millis() - lastFrameMs > STREAM_STALL_MS) {
+        esp_camera_deinit();
+        const esp_err_t err = startCamera();
+        cameraError = (int)err;
+        cameraState = err == ESP_OK ? 1 : -1;
+        cameraStalls = cameraStalls + 1;
+        return ESP_FAIL;   // closes this viewer; the host reconnects
+      }
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
+    lastFrameMs = millis();
     const int headerLength = snprintf(
         part, sizeof(part),
         "\r\n--" STREAM_BOUNDARY "\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
@@ -665,6 +686,14 @@ static void announceCamera() {
                                   : ", 320x240 - no PSRAM: set Tools > PSRAM to OPI PSRAM");
     }
   }
+  static int reportedStalls = 0;
+  const int stalls = cameraStalls;
+  if (stalls != reportedStalls) {
+    reportedStalls = stalls;
+    Serial.print("CAM sensor stalled, camera restarted (");
+    Serial.print(stalls);
+    Serial.println(stalls == 1 ? " time)" : " times)");
+  }
   const int networks = wifiScanCount.load(std::memory_order_acquire);
   if (!scanReported && networks != SCAN_PENDING) {
     scanReported = true;
@@ -725,7 +754,7 @@ void setup() {
 
   // Report PWM attach state at boot. A failed attach is otherwise invisible:
   // every command still succeeds, no pulses are ever emitted.
-  Serial.print("OK BOOT killswitch-actuator v3.1 pan_ch=");
+  Serial.print("OK BOOT killswitch-actuator v3.2 pan_ch=");
   Serial.print(panChannel);
   Serial.print(" tilt_ch=");
   Serial.print(tiltChannel);

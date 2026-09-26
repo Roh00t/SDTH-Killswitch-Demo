@@ -149,7 +149,7 @@ FIND_HINTS = [
     "  - Only this laptop's /24 was scanned. On a large network (campus or venue",
     "    Wi-Fi) the camera can sit elsewhere, and client isolation blocks it outright:",
     "    use a phone hotspot for both.",
-    "  - Firmware v3.1 says why Wi-Fi failed: Arduino Serial Monitor at 921600,",
+    "  - Firmware v3.1+ says why Wi-Fi failed: Arduino Serial Monitor at 921600,",
     "    press RST on the board, and read the 'CAM wifi ...' lines.",
 ]
 
