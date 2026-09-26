@@ -146,6 +146,23 @@ class ActuatorDriver(ABC):
         """De-energise, then release the link. Idempotent."""
 
 
+def port_open_error(port: str, exc: BaseException) -> str:
+    """The message for a serial port that would not open.
+
+    Windows reports a port another program holds as "Access is denied", which
+    reads like a permissions problem. It almost always means main.py, a stray
+    python or the Arduino Serial Monitor still has the port, so say that.
+    """
+    text = str(exc)
+    held = ("Access is denied" in text or "PermissionError" in text
+            or "Device or resource busy" in text or isinstance(exc, PermissionError))
+    if not held:
+        return f"Could not open {port}: {text}"
+    return (f"Could not open {port}: {text}. Another program has {port} open: stop "
+            f"main.py (or any python still running: Get-Process python* | Stop-Process), "
+            f"close the Arduino Serial Monitor, then retry")
+
+
 class SerialActuator(ActuatorDriver):
     """ESP32-S3 gimbal over the UART bridge.
 
@@ -217,7 +234,7 @@ class SerialActuator(ActuatorDriver):
                 self._port_name, self._baud, timeout=0.1, write_timeout=0.5
             )
         except (OSError, ValueError) as exc:
-            raise ActuatorError(f"Could not open {self._port_name}: {exc}") from exc
+            raise ActuatorError(port_open_error(self._port_name, exc)) from exc
 
         # ESP32 resets when the bridge asserts DTR; wait out the boot. Capture
         # the banner BEFORE discarding the buffer — it carries the PWM attach

@@ -129,7 +129,7 @@ Times are measured from launching window D.
 |---|---|
 | Laser on when it shouldn't be | **Pull the ESP32 USB** (off within 250 ms) |
 | SPACE did nothing | Keys only reach the **Operator Console** window: click its title bar. SPACE only counts in OPERATOR_AUTH. If the window expired, the node re-holds and asks again about 3 s later. A late SPACE is **discarded, not saved**, so press again in the new window |
-| `Could not open COM3` | Something else holds the port (`serial_probe`, the Arduino serial monitor), or it moved: `serial_probe --list`. Otherwise use the fallback below |
+| `Could not open COM3` (often `Access is denied`) | Something else holds the port: window B, `serial_probe`, the Arduino Serial Monitor, or a leftover python (`Get-Process python* \| Stop-Process -Force`, then restart C and D). Still denied: replug the ESP32 USB. Or it moved: `serial_probe --list`. Otherwise use the fallback below |
 | Pill stuck in SCAN | The target isn't detected: check it's at the tape, check the lighting, re-run `vision_probe` |
 | Node drops to IDLE with `camera lost` | The stream stalled: Wi-Fi, ESP32 power, or a browser tab took the one stream slot. **Close any tab on the stream.** Window B keeps reconnecting and logs `Camera stream … recovered` when frames return; the next cue then works. Still lost after 30 s: press RST on the ESP32 (safe: the laser pin boots low), then restart window B. Firmware v3.2 restarts a stalled sensor by itself and prints `CAM sensor stalled, camera restarted` |
 | Gimbal turns **away** from the target | Wrong image direction: set `flip_horizontal` (pan) or `flip_vertical` (tilt) in `config/fallback.yaml`, restart window B |

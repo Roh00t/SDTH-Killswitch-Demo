@@ -208,3 +208,30 @@ class TestPortResolution:
         )
         with pytest.raises(ActuatorError, match="ambiguous"):
             mod.resolve_port("auto")
+
+
+class TestPortOpenError:
+    """Windows says "Access is denied" for a port another program holds."""
+
+    def test_a_held_port_names_the_fix(self, monkeypatch):
+        import serial
+
+        from helper.hardware.actuator import SerialActuator
+
+        def taken(*args, **kwargs):
+            raise serial.SerialException(
+                "could not open port 'COM3': PermissionError(13, 'Access is denied.', None, 5)")
+
+        monkeypatch.setattr(serial, "Serial", taken)
+        with pytest.raises(ActuatorError) as raised:
+            SerialActuator("COM3").connect()
+        message = str(raised.value)
+        assert "Access is denied" in message                  # the original text survives
+        assert "Another program has COM3 open" in message
+        assert "Arduino Serial Monitor" in message
+
+    def test_a_missing_port_gets_no_misleading_hint(self):
+        from helper.hardware.actuator import port_open_error
+
+        message = port_open_error("COM9", FileNotFoundError("could not open port 'COM9'"))
+        assert message == "Could not open COM9: could not open port 'COM9'"
