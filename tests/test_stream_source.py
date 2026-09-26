@@ -132,6 +132,48 @@ class TestWithFakes:
         finally:
             src.stop()
 
+    def test_a_stream_that_comes_back_is_healthy_again(self):
+        # The rig on venue Wi-Fi: a stall long enough to declare the camera
+        # lost, then the ESP32 answers again. It used to stay dead until the
+        # node was restarted.
+        back = threading.Event()
+        opens = []
+
+        def factory(url):
+            opens.append(url)
+            if len(opens) == 1:
+                return FakeCapture(1)
+            return FakeCapture(10_000) if back.is_set() else FakeCapture(0)
+
+        src = HttpStreamSource("http://cam/stream", reconnect_window_s=0.5,
+                               capture_factory=factory)
+        src.start()
+        try:
+            assert wait_for(lambda: not src.is_healthy, timeout=3.0)
+            _, during_outage = src.read()
+            back.set()
+            assert wait_for(lambda: src.is_healthy, timeout=5.0), \
+                "frames returned, so the source must report healthy again"
+            assert wait_for(lambda: src.read()[1] > during_outage + 5)
+        finally:
+            src.stop()
+
+    def test_stop_is_prompt_while_reconnecting(self):
+        opens = []
+
+        def factory(url):
+            opens.append(url)
+            return FakeCapture(1 if len(opens) == 1 else 0)
+
+        src = HttpStreamSource("http://cam/stream", reconnect_window_s=0.3,
+                               capture_factory=factory)
+        src.start()
+        assert wait_for(lambda: not src.is_healthy, timeout=3.0)
+        started = time.monotonic()
+        src.stop()
+        assert time.monotonic() - started < 2.0
+        assert not src.is_healthy
+
     @pytest.mark.parametrize("h, v, bright_col", [(False, False, 0), (True, False, 63)])
     def test_flip_mirrors_the_frame(self, h, v, bright_col):
         src = HttpStreamSource("http://cam/stream", flip_horizontal=h, flip_vertical=v,
@@ -253,6 +295,31 @@ class TestRealMjpegOverHttp:
             assert wait_for(lambda: not src.is_healthy, timeout=8.0)
         finally:
             src.stop()
+
+    def test_server_back_on_the_same_port_means_healthy_again(self, mjpeg_server):
+        url, server = mjpeg_server
+        port = server.server_address[1]
+        src = HttpStreamSource(url, read_timeout_s=0.5, open_timeout_s=0.5,
+                               reconnect_window_s=1.0)
+        src.start()
+        replacement = None
+        try:
+            server.stopping.set()
+            server.shutdown()
+            server.server_close()
+            assert wait_for(lambda: not src.is_healthy, timeout=8.0)
+            replacement = ThreadingHTTPServer(("127.0.0.1", port), _MjpegHandler)
+            replacement.daemon_threads = True
+            replacement.stopping = threading.Event()
+            threading.Thread(target=replacement.serve_forever, daemon=True).start()
+            assert wait_for(lambda: src.is_healthy, timeout=10.0), \
+                "the ESP32 answering again must bring the camera back"
+        finally:
+            src.stop()
+            if replacement is not None:
+                replacement.stopping.set()
+                replacement.shutdown()
+                replacement.server_close()
 
     def test_camera_probe_reports_found_with_size_and_rate(self, mjpeg_server):
         from tools.camera_probe import probe_stream

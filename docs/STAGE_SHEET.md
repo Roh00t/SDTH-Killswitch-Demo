@@ -129,7 +129,7 @@ Times are measured from launching window D.
 | SPACE did nothing | Keys only reach the **Operator Console** window: click its title bar. SPACE only counts in OPERATOR_AUTH. If the window expired, the node re-holds and asks again about 3 s later. A late SPACE is **discarded, not saved**, so press again in the new window |
 | `Could not open COM3` | Something else holds the port (`serial_probe`, the Arduino serial monitor), or it moved: `serial_probe --list`. Otherwise use the fallback below |
 | Pill stuck in SCAN | The target isn't detected: check it's at the tape, check the lighting, re-run `vision_probe` |
-| Node drops to IDLE with `camera lost` | The stream died: ESP32 power, hotspot, or a browser tab took the one stream slot. Close the tab, check `camera_probe`, restart window B |
+| Node drops to IDLE with `camera lost` | The stream stalled: Wi-Fi, ESP32 power, or a browser tab took the one stream slot. **Close any tab on the stream.** Window B keeps reconnecting and logs `Camera stream … recovered` when frames return; the next cue then works. Still lost after 30 s: `camera_probe --find --write`, then restart window B |
 | Gimbal turns **away** from the target | Wrong image direction: set `flip_horizontal` (pan) or `flip_vertical` (tilt) in `config/fallback.yaml`, restart window B |
 | Dashboard reads CONNECTING | Window D isn't running |
 | STATE `NO LINK`, Panel C `NO NODE TELEMETRY` | Window B isn't running or isn't on the broker |

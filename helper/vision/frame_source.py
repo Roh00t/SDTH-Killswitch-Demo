@@ -287,9 +287,12 @@ class HttpStreamSource(FrameSource):
     daemon thread reads the stream as fast as it arrives and keeps only the
     newest frame (CLAUDE.md rule 7).
 
-    A Wi-Fi drop ends the stream. The reader reopens it and only declares the
-    source unhealthy after `reconnect_window_s` without a frame, at which point
-    the node's liveness check drops to IDLE.
+    A Wi-Fi drop ends the stream. The reader reopens it and declares the source
+    unhealthy after `reconnect_window_s` without a frame, at which point the
+    node's liveness check drops to IDLE. It then keeps reconnecting, and turns
+    healthy again on the first new frame. A venue network that stalls for a few
+    seconds therefore costs one engagement, not the rest of the demo. Recovery
+    re-arms nothing: leaving IDLE still takes a fresh cue, a HOLD and SPACE.
 
     Latency note: frames are timestamped when the host receives them, so the
     ESP32's JPEG encode and the Wi-Fi hop (~100-200 ms) are not in the measured
@@ -343,7 +346,8 @@ class HttpStreamSource(FrameSource):
         self._cap: Optional["cv2.VideoCapture"] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
-        self._running = threading.Event()
+        self._running = threading.Event()   # stop flag: cleared only by stop()
+        self._healthy = threading.Event()   # frames are arriving
         self._latest: Optional[np.ndarray] = None
         self._frame_id: int = 0
         self._actual_size: Tuple[int, int] = (0, 0)
@@ -375,6 +379,7 @@ class HttpStreamSource(FrameSource):
         with self._lock:
             self._latest = probe
             self._frame_id = 1
+        self._healthy.set()
         self._running.set()
         self._thread = threading.Thread(
             target=self._reader_loop, name="stream-grabber", daemon=True
@@ -384,9 +389,12 @@ class HttpStreamSource(FrameSource):
     def _reader_loop(self) -> None:
         """Read continuously, keep only the newest frame, reconnect on loss.
 
-        Runs on the grabber thread.
+        Runs on the grabber thread until stop(). Past `reconnect_window_s`
+        without a frame the source reports unhealthy, once, and keeps trying:
+        every second, logging every tenth attempt, until frames return.
         """
         last_frame_at = time.monotonic()
+        outage_reconnects = 0
         while self._running.is_set():
             cap = self._cap
             ok, frame = cap.read() if cap is not None else (False, None)
@@ -396,21 +404,40 @@ class HttpStreamSource(FrameSource):
                 with self._lock:
                     self._latest = frame
                     self._frame_id += 1
+                if not self._healthy.is_set():
+                    logger.info("Camera stream %s recovered after %d reconnects",
+                                self._url, outage_reconnects)
+                    self._healthy.set()
+                outage_reconnects = 0
                 continue
 
-            if time.monotonic() - last_frame_at > self._reconnect_window_s:
+            if (self._healthy.is_set()
+                    and time.monotonic() - last_frame_at > self._reconnect_window_s):
                 logger.error(
-                    "Camera stream %s gave no frame for %.1fs; treating as disconnected",
+                    "Camera stream %s gave no frame for %.1fs; treating as "
+                    "disconnected and still reconnecting",
                     self._url, self._reconnect_window_s,
                 )
-                self._running.clear()
-                break
+                self._healthy.clear()
             if cap is not None:
                 cap.release()
-            time.sleep(0.2)
+                self._cap = None
+            time.sleep(0.2 if self._healthy.is_set() else 1.0)
+            if not self._running.is_set():
+                break
             self._reconnects += 1
-            logger.warning("Camera stream dropped; reconnecting (%d)", self._reconnects)
-            self._cap = self._safe_open()
+            outage_reconnects += 1
+            if self._healthy.is_set():
+                logger.warning("Camera stream dropped; reconnecting (%d)", self._reconnects)
+            elif outage_reconnects % 10 == 0:
+                logger.warning("Camera stream %s still down; %d reconnects so far",
+                               self._url, outage_reconnects)
+            reopened = self._safe_open()
+            if not self._running.is_set():   # stop() ran while we were connecting
+                if reopened is not None:
+                    reopened.release()
+                break
+            self._cap = reopened
 
     def _safe_open(self) -> Optional["cv2.VideoCapture"]:
         """Open the stream; None instead of an exception.
@@ -436,6 +463,7 @@ class HttpStreamSource(FrameSource):
     def stop(self) -> None:
         """Stop the reader thread and close the stream."""
         self._running.clear()
+        self._healthy.clear()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=3.0)
@@ -453,8 +481,9 @@ class HttpStreamSource(FrameSource):
 
     @property
     def is_healthy(self) -> bool:
-        """False once the stream has been declared disconnected."""
-        return self._running.is_set()
+        """False while no frame has arrived for `reconnect_window_s`, and after
+        stop(). True again as soon as a reconnect delivers a frame."""
+        return self._healthy.is_set()
 
 
 class MockFrameSource(FrameSource):
