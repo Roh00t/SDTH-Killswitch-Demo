@@ -115,7 +115,15 @@ def main() -> int:
                 cv2.putText(canvas, tag, (x1, max(16, y1 - 6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 2 if passes else 1)
 
+            # Boresight reticle, as on the operator console. With serial_probe
+            # --interactive firing a 2 s dot (a 90 90, arm, on), move the laser
+            # mount until the dot sits here at the target's distance.
             h = canvas.shape[0]
+            cx, cy = canvas.shape[1] // 2, h // 2
+            for x0, y0, x1, y1 in ((cx - 20, cy, cx - 6, cy), (cx + 6, cy, cx + 20, cy),
+                                   (cx, cy - 20, cx, cy - 6), (cx, cy + 6, cx, cy + 20)):
+                cv2.line(canvas, (x0, y0), (x1, y1), (255, 255, 255), 1)
+
             cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 30), (20, 20, 24), -1)
             cv2.putText(canvas,
                         f"floor={conf_floor:.2f}  node_conf={node_conf:.2f}  "

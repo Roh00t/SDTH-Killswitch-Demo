@@ -63,9 +63,11 @@ not build if any actuator pin lands on a camera pin.
 | ☐ | Same network | Laptop and ESP32 both on the phone hotspot (2.4 GHz; iPhone: *Maximise Compatibility*) | — |
 | ☐ | Camera stream | Close any browser tab showing the stream. `python -m tools.camera_probe --config config/fallback.yaml` | `camera.stream_url=… -> FOUND (640x480, N fps)`. `NOT FOUND`: the hotspot may have given it a new address, so run it again with `--find --write` |
 | ☐ | Mark the target spot | `python -m tools.serial_probe --port COM3 --interactive`, then `a 45 97`, tape where the camera points, then `a 90 90`, then **`q`** | Tape on the backstop. Redo it whenever `actuator.pan_reversed` changes: pan 45 then points the other way. **Quit** before step B: COM3 is exclusive. Never run `serial_probe` without `--interactive` here, because the full probe **fires the laser** |
-| ☐ | The target is detected | Target on its stand at the tape. `python -m tools.vision_probe --config config/fallback.yaml`, then **Q** to quit (the camera is exclusive) | A box labelled `bird`, `airplane`, `kite` or `frisbee` at **≥ 0.40**. COCO has no drone class, so a drone prop usually fails this |
+| ☐ | Boresight the laser | Matte paper at the tape, nothing glossy. Window 1: `python -m tools.vision_probe --config config/bench.yaml`. Window 2: `python -m tools.serial_probe --port COM3 --interactive`, then `a 45 97`, `arm`, `on` | The 2 s dot lands on the white **reticle** in the probe window. Off? Bend or shim the laser mount, `arm`, `on` again. Then `q` in window 2 and **Q** in window 1: COM3 and the stream are both exclusive |
+| ☐ | The target is detected | Target on its stand at the tape. `python -m tools.vision_probe --config config/bench.yaml`, then **Q** to quit (the camera is exclusive) | **A drone photo:** a box labelled `drone` at **≥ 0.40**, with `config/bench.yaml` (`best.onnx`, the only model with a drone class). **A bird, airplane, kite or frisbee:** `config/fallback.yaml` (COCO), which labels a drone photo `airplane` or `kite` at best. Show the photo on paper if you can: a glossy screen mirrors the beam and washes out the dot on video. If it must be a screen, turn its brightness down and angle it so the reflection lands on the backstop |
 | ☐ | Works without internet | `dir yolo11s.pt` in the repo folder, then run the whole sheet once with **no internet** (hotspot mobile data off; the camera still needs the hotspot itself) | The file exists. It only auto-downloads when online |
 | ☐ | Broker is local only | `Get-Service mosquitto`, then `netstat -an \| findstr :1883` | Running, listening on `127.0.0.1:1883` only. If it shows `0.0.0.0:1883`, anyone on the hotspot can send radar cues (cues carry no token): set `listener 1883 127.0.0.1` in `mosquitto.conf` and restart the service |
+| ☐ | **Preflight (the gate)** | Target at the tape, nothing else running (no browser tab on the stream, no `serial_probe`, no Serial Monitor). `python -m tools.preflight --config config/bench.yaml` | `READY` and a start order. It checks broker, COM3, the firmware's boot line (**v3.3 with `pan_reversed: true` FAILs: pan reversed twice**), the camera address, the stream and ~6 s of detection, and it never fires. It resets the ESP32 like RST; no boot line after 5 s means press RST. Each FAIL prints its fix: fix, rerun, then T-5 with **the same config** |
 
 ## T-15: tuning, only if the gimbal misbehaves
 
@@ -84,7 +86,7 @@ in `helper/state/control.py`.
 
 ## T-5: start order
 
-One PowerShell window per command, all in the repo folder. If PowerShell shows `>>`,
+One PowerShell window per command, all in the repo folder, using the config the preflight passed with (`config/bench.yaml` for the drone photo; the commands below show `fallback.yaml`). If PowerShell shows `>>`,
 two lines went into one window: press Ctrl+C and split them.
 
 | Window | Command | Healthy when |
@@ -131,7 +133,7 @@ Times are measured from launching window D.
 | Laser on when it shouldn't be | **Pull the ESP32 USB** (off within 250 ms) |
 | SPACE did nothing | Keys only reach the **Operator Console** window: click its title bar. SPACE only counts in OPERATOR_AUTH. If the window expired, the node re-holds and asks again about 3 s later. A late SPACE is **discarded, not saved**, so press again in the new window |
 | `Could not open COM3` (often `Access is denied`) | Something else holds the port: window B, `serial_probe`, the Arduino Serial Monitor, or a leftover python (`Get-Process python* \| Stop-Process -Force`, then restart C and D). Still denied: replug the ESP32 USB. Or it moved: `serial_probe --list`. Otherwise use the fallback below |
-| Pill stuck in SCAN | The target isn't detected: check it's at the tape, check the lighting, re-run `vision_probe` |
+| Pill stuck in SCAN | The target isn't detected: check it's at the tape, check the lighting and screen glare, stop window B, then run `python -m tools.preflight --config <config>` and read the detection row |
 | Node drops to IDLE with `camera lost` | The stream stalled: Wi-Fi, ESP32 power, or a browser tab took the one stream slot. **Close any tab on the stream.** Window B keeps reconnecting and logs `Camera stream … recovered` when frames return; the next cue then works. Still lost after 30 s: press RST on the ESP32 (safe: the laser pin boots low), then restart window B. Firmware v3.2 restarts a stalled sensor by itself and prints `CAM sensor stalled, camera restarted` |
 | Gimbal turns **away** from the target | Wrong image direction: set `flip_horizontal` (pan) or `flip_vertical` (tilt) in `config/fallback.yaml`, restart window B |
 | Dashboard reads CONNECTING | Window D isn't running |

@@ -240,7 +240,7 @@ python -m tools.operator_console
 **Tests:**
 
 ```bash
-pytest tests/ -q        # 337 tests, zero hardware, ~7s
+pytest tests/ -q        # 374 tests, zero hardware, ~7s
 ```
 
 ---

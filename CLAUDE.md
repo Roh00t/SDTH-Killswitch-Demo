@@ -211,13 +211,14 @@ pip install -r requirements.txt
 
 python main.py --config config/bench.yaml           # full node
 python main.py --config config/bench.yaml --mock    # no hardware at all
+python -m tools.preflight --config config/bench.yaml  # broker, COM3, firmware version, camera address, stream, target detected; never fires
 python -m tools.camera_probe --config config/fallback.yaml  # configured index FOUND?, fps, BUFFERSIZE
 python -m tools.camera_probe --config config/fallback.yaml --find --write  # locate the ESP32 camera, set stream_url
 python -m tools.serial_probe --port <dev>           # every firmware interlock
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 337 tests, zero hardware
+pytest tests/ -q                                    # 374 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -323,7 +324,7 @@ a human reads.
 
 ## Testing
 
-337 tests, all hardware-free, ~2 s.
+374 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
@@ -336,6 +337,7 @@ a human reads.
 | `test_camera_probe.py` | Configured camera index FOUND / NOT FOUND, per-OS no-camera hints, `--find` against the firmware's stream format, `--write` keeping every comment |
 | `test_stream_source.py` | Wi-Fi camera: newest frame, reconnect, unhealthy on loss then healthy again when frames return, flip, bare-address completion, real MJPEG decode of the firmware's format |
 | `test_sim_scene.py` | `--sim-target` scene: refuses a real actuator, closes the loop, fresh ids on reset |
+| `test_preflight.py` | Firmware version verdicts (v3.3 + `pan_reversed` double mirror), RTS reset pulse with DTR held low, boot reader sends nothing, camera address match, one-viewer stream retry, detection hit ratio and what the model saw instead |
 
 **Unit tests are necessary but not sufficient.** Five real bugs were found only by running
 the whole node in mock mode — duration logging, mock free-running, wrong teardown verb,
