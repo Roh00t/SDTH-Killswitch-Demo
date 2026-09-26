@@ -29,7 +29,7 @@ machine, or MQTT input handling are safety-critical.
 |---|---|---|
 | Host | Laptop/PC — Windows demo box, macOS dev | — |
 | Edge actuator | ESP32-S3-N16R8 (16 MB flash, 8 MB PSRAM) | CH343 USB-UART @921600, `COM3` |
-| Gimbal | 2× SG90, separate 5 V rail | pan GPIO 14 / tilt GPIO 21. Pan is mirrored at the PWM write (`PAN_REVERSED`, firmware v3.3): the rig's SG90 turns anticlockwise as its angle rises, and every angle upstream means clockwise |
+| Gimbal | 2× SG90, separate 5 V rail | pan GPIO 14 / tilt GPIO 21 |
 | Effector | KY-008 650 nm laser module, low-side switched | GPIO 1 → 1 kΩ → 2N2222 base, 10 kΩ pulldown; KY-008 `S` → board 5V pin, `−` → collector |
 | Camera | OV5640 on the ESP32-S3's camera connector (ESP32-S3-EYE layout), MJPEG over Wi-Fi | GPIO 4–13, 15–18; host reads `camera.stream_url` |
 

@@ -120,15 +120,6 @@ static const float TILT_MAX  = 135.0f;
 static const float STOW_PAN  = 90.0f;
 static const float STOW_TILT = 90.0f;
 
-// The rig's pan SG90 turns ANTICLOCKWISE, seen from above, as its angle rises.
-// Everything upstream means CLOCKWISE: cue geometry, the dashboard radar, the
-// control law and serial_probe's `a`. writePan() mirrors the angle at the one
-// place it becomes PWM, so every angle above that line (bounds, ST frames, the
-// host) keeps that convention. PAN_MIN/PAN_MAX are symmetric about 90, so the
-// mirrored angle is always inside them. false = a servo that already turns
-// clockwise.
-static constexpr bool PAN_REVERSED = true;
-
 // SG90 pulse widths. Calibrate per servo if travel is short or it buzzes at rest.
 static const int SERVO_MIN_US = 500;
 static const int SERVO_MAX_US = 2400;
@@ -239,13 +230,6 @@ static float clampf(float value, float lo, float hi) {
   return value;
 }
 
-/* The only place a pan angle reaches the servo. Clamps, then mirrors when
- * PAN_REVERSED. Loop thread (core 1) and setup() only. */
-static void writePan(float degrees) {
-  const float clamped = clampf(degrees, PAN_MIN, PAN_MAX);
-  servoPan.write((int)roundf(PAN_REVERSED ? (PAN_MIN + PAN_MAX) - clamped : clamped));
-}
-
 /* Parse "A<pan>,<tilt>". Returns false on any malformation. */
 static bool parseAngles(const char* body, size_t length, float* pan, float* tilt) {
   char work[RX_BUFFER_SIZE];
@@ -316,11 +300,11 @@ static void handleCommand(char* line, size_t length) {
       lastCommandMs = millis();
       Serial.println("OK T raw sweep starting");
       for (int angle = 20; angle <= 160; angle += 10) {
-        writePan(angle);
+        servoPan.write(angle);
         servoTilt.write(constrain(angle, (int)TILT_MIN, (int)TILT_MAX));
         delay(120);
       }
-      writePan(STOW_PAN);
+      servoPan.write((int)STOW_PAN);
       servoTilt.write((int)STOW_TILT);
       currentPan = targetPan = STOW_PAN;
       currentTilt = targetTilt = STOW_TILT;
@@ -438,7 +422,7 @@ static void updateServos() {
 
   if (fabsf(dPan) > DEADBAND_DEG) {
     currentPan += clampf(dPan, -SLEW_RATE_DEG, SLEW_RATE_DEG);
-    writePan(currentPan);
+    servoPan.write((int)roundf(clampf(currentPan, PAN_MIN, PAN_MAX)));
   }
   if (fabsf(dTilt) > DEADBAND_DEG) {
     currentTilt += clampf(dTilt, -SLEW_RATE_DEG, SLEW_RATE_DEG);
@@ -765,7 +749,7 @@ void setup() {
   panChannel  = servoPan.attach(PIN_SERVO_PAN,   SERVO_MIN_US, SERVO_MAX_US);
   tiltChannel = servoTilt.attach(PIN_SERVO_TILT, SERVO_MIN_US, SERVO_MAX_US);
 
-  writePan(STOW_PAN);
+  servoPan.write((int)STOW_PAN);
   servoTilt.write((int)STOW_TILT);
 
   safeState();
@@ -774,7 +758,7 @@ void setup() {
 
   // Report PWM attach state at boot. A failed attach is otherwise invisible:
   // every command still succeeds, no pulses are ever emitted.
-  Serial.print("OK BOOT killswitch-actuator v3.3 pan_ch=");
+  Serial.print("OK BOOT killswitch-actuator v3.2 pan_ch=");
   Serial.print(panChannel);
   Serial.print(" tilt_ch=");
   Serial.print(tiltChannel);
