@@ -78,7 +78,6 @@ data/augmented/
 *.npz
 captures/
 recordings/
-*.mp4
 *.avi
 *.mov
 *.mkv
