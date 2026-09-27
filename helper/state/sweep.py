@@ -129,7 +129,7 @@ def cue_to_gimbal(
 ) -> Optional[Tuple[float, float]]:
     """Convert a C2 cue to gimbal angles, or None if unreachable.
 
-    A 180-degree pan gimbal cannot cover 360 degrees of azimuth. Cues outside
+    A 140-degree pan gimbal cannot cover 360 degrees of azimuth. Cues outside
     the reachable arc are REJECTED rather than clamped: silently slewing to the
     edge of travel and searching the wrong sky is worse than declining the cue,
     because it looks like the system is working.

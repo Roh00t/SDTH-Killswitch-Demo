@@ -13,8 +13,12 @@ from __future__ import annotations
 from typing import Optional
 
 # Servo bounds. Enforced here AND in firmware (guardrails.md section 3, HARD).
-PAN_MIN_DEG: float = 0.0
-PAN_MAX_DEG: float = 180.0
+# Pan stops 20 deg short of each end: 0/180 is 500/2400 us, past many SG90s'
+# mechanical stops, and a servo held there stalls until it breaks. See the
+# bounds comment in esp32_actuator.ino. Symmetric about 90 so mirror_pan and
+# the cue geometry keep stow at the centre.
+PAN_MIN_DEG: float = 20.0
+PAN_MAX_DEG: float = 160.0
 TILT_MIN_DEG: float = 45.0
 TILT_MAX_DEG: float = 135.0
 
@@ -26,6 +30,14 @@ HEARTBEAT_INTERVAL_S: float = 0.10
 MAX_BURN_MS: int = 2000
 
 BAUD_RATE: int = 921600
+
+# SerialActuator.close() slews the gimbal to stow before letting go, so the
+# next ESP32 reset (setup() writes stow at full servo speed, unslewed) starts
+# from where the gimbal already is instead of jumping up to 80 deg under the
+# camera's inertia. 80 deg at the firmware's ~250 deg/s is ~0.3 s; the rest
+# is margin for a status frame.
+PARK_TIMEOUT_S: float = 1.5
+PARK_TOLERANCE_DEG: float = 1.0
 
 # --- link bring-up ----------------------------------------------------------
 # Opening the port asserts DTR, which resets the ESP32. Both values below are

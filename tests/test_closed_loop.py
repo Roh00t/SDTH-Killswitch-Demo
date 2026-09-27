@@ -10,6 +10,7 @@ import math
 
 import pytest
 
+from helper.hardware.protocol import PAN_MAX_DEG, TILT_MIN_DEG
 from helper.state.control import ControlGains, compute_correction
 from tools.simulator import (
     SimulatedGimbal,
@@ -49,7 +50,8 @@ class TestStaticConvergence:
 class TestMovingTargetAndFeedForward:
     def test_crossing_target_converges_with_prediction(self):
         result = run_engagement(
-            SimulatedTarget(azimuth_deg=100.0, elevation_deg=90.0, az_rate_deg_s=20.0),
+            # Starts at 70 so the ramp stays inside the 20-160 pan arc.
+            SimulatedTarget(azimuth_deg=70.0, elevation_deg=90.0, az_rate_deg_s=20.0),
             default_gains(), use_prediction=True, ticks=150,
         )
         assert result.converged and result.steady_state_error_px < HOLD_PX
@@ -103,7 +105,7 @@ class TestSimulationFidelity:
     def test_gimbal_clamps_to_bounds(self):
         gimbal = SimulatedGimbal()
         gimbal.command(999.0, -999.0)
-        assert gimbal.commanded_pan == 180.0 and gimbal.commanded_tilt == 45.0
+        assert gimbal.commanded_pan == PAN_MAX_DEG and gimbal.commanded_tilt == TILT_MIN_DEG
 
     def test_target_outside_frame_is_not_observed(self):
         world = SimulatedWorld()
@@ -159,7 +161,8 @@ class TestDetectionRateDecoupling:
 
     def test_steady_rate_target_converges_at_measured_detection_rate(self):
         result = run_engagement(
-            SimulatedTarget(azimuth_deg=100.0, elevation_deg=90.0, az_rate_deg_s=20.0),
+            # Starts at 70 so the ramp stays inside the 20-160 pan arc.
+            SimulatedTarget(azimuth_deg=70.0, elevation_deg=90.0, az_rate_deg_s=20.0),
             default_gains(), tick_hz=100.0, detection_hz=4.6, ticks=400,
         )
         assert result.steady_state_error_px < HOLD_PX
@@ -183,7 +186,7 @@ class TestDetectionRateDecoupling:
     def test_target_rate_envelope_at_measured_fps(self, rate):
         """Documents the envelope: steady-rate targets up to 20 deg/s hold."""
         result = run_engagement(
-            SimulatedTarget(azimuth_deg=100.0, elevation_deg=90.0, az_rate_deg_s=rate),
+            SimulatedTarget(azimuth_deg=70.0, elevation_deg=90.0, az_rate_deg_s=rate),
             default_gains(), tick_hz=100.0, detection_hz=4.6, ticks=400,
         )
         assert result.steady_state_error_px < HOLD_PX

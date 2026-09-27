@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from helper.hardware.protocol import PAN_MAX_DEG, PAN_MIN_DEG, TILT_MAX_DEG, TILT_MIN_DEG
 from helper.state.machine import (
     LEGAL_TRANSITIONS,
     EngagementState,
@@ -200,14 +201,14 @@ class TestSweepBoundsBug:
         sweep.reset(90.0, 90.0)
         for _ in range(2000):
             pan, tilt = sweep.step()
-            assert 0.0 <= pan <= 180.0, f"pan escaped to {pan}"
-            assert 45.0 <= tilt <= 135.0, f"tilt escaped to {tilt}"
+            assert PAN_MIN_DEG <= pan <= PAN_MAX_DEG, f"pan escaped to {pan}"
+            assert TILT_MIN_DEG <= tilt <= TILT_MAX_DEG, f"tilt escaped to {tilt}"
 
     def test_reversal_moves_away_from_the_bound(self):
         sweep = SweepController(pan_step_deg=10.0, tilt_step_deg=10.0)
-        sweep.reset(175.0, 90.0)
-        first, _ = sweep.step()        # would be 185 -> clamps to the bound
-        assert first == 180.0
+        sweep.reset(165.0, 90.0)
+        first, _ = sweep.step()        # would be 175 -> clamps to the bound
+        assert first == PAN_MAX_DEG
         second, _ = sweep.step()       # must now move AWAY, not further out
         assert second < first
 

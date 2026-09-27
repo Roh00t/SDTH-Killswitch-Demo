@@ -252,6 +252,8 @@ class KillswitchNode:
                 connect_timeout=act.get("connect_timeout_s", CONNECT_TIMEOUT_S),
                 boot_settle_s=act.get("boot_settle_s", BOOT_SETTLE_S),
                 pan_reversed=bool(act.get("pan_reversed", False)),
+                stow_pan_deg=act["stow_pan_deg"],
+                stow_tilt_deg=act["stow_tilt_deg"],
             )
         self._actuator.connect()
 

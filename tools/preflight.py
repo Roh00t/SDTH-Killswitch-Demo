@@ -164,7 +164,7 @@ _VERSION = re.compile(r"killswitch-actuator v(\d+)(?:\.(\d+))?")
 
 
 def parse_boot_version(banner: str) -> Optional[Tuple[int, int]]:
-    """``OK BOOT killswitch-actuator v3.2 ...`` -> (3, 2). ``v3`` -> (3, 0)."""
+    """``OK BOOT killswitch-actuator v3.4 ...`` -> (3, 4). ``v3`` -> (3, 0)."""
     match = _VERSION.search(banner)
     if match is None:
         return None
@@ -179,38 +179,40 @@ def firmware_verdict(banner: Optional[str], attach_failed: bool,
     laptop as well, pan is reversed twice and the gimbal turns away from every
     cue, with nothing else in the system able to notice.
 
+    Anything before v3.4 lets pan reach 0 and 180 (500/2400 us, past many
+    SG90s' end stops) and still answers the raw ``T`` sweep. The laptop clamps
+    pan to 20-160 on its own, so those boards WARN rather than FAIL, but the
+    bounds are then enforced once, not twice.
+
     Thread: main thread.
     """
+    flash = "Flash firmware/esp32_actuator from main (v3.4)."
     if banner is None:
         if not reset_requested:
             return Row("firmware", Status.WARN, "version not checked (--no-reset)",
                        "Run without --no-reset, or press RST with the Arduino Serial "
-                       "Monitor open: the boot line must say v3.2.")
+                       "Monitor open: the boot line must say v3.4.")
         return Row("firmware", Status.WARN, "no boot line: version and PWM unchecked",
                    "Press RST on the ESP32 while this runs, or run it again.")
     version = parse_boot_version(banner)
     if version is None:
-        return Row("firmware", Status.WARN, f"unrecognised boot line: {banner}",
-                   "Flash firmware/esp32_actuator from main (v3.2).")
+        return Row("firmware", Status.WARN, f"unrecognised boot line: {banner}", flash)
     label = f"v{version[0]}.{version[1]}"
     if version < (3, 0):
-        return Row("firmware", Status.FAIL, f"{label} drives the old pins 5/6/7",
-                   "Flash firmware/esp32_actuator from main (v3.2).")
+        return Row("firmware", Status.FAIL, f"{label} drives the old pins 5/6/7", flash)
     if attach_failed or "pwm=ok" not in banner:
         return Row("firmware", Status.FAIL, f"{label}: servo PWM did not attach",
                    "Check the servo signal wires on GPIO 14/21, then press RST.")
-    if version == (3, 3):
-        if pan_reversed:
-            return Row("firmware", Status.FAIL,
-                       "v3.3 mirrors pan in firmware AND actuator.pan_reversed is true: "
-                       "pan is reversed twice",
-                       "Flash firmware/esp32_actuator from main (v3.2). Or set "
-                       "actuator.pan_reversed: false and redo the tape mark.")
-        return Row("firmware", Status.PASS, "v3.3 (pan mirrored in firmware), pwm=ok")
-    if version < (3, 2):
+    if version == (3, 3) and pan_reversed:
+        return Row("firmware", Status.FAIL,
+                   "v3.3 mirrors pan in firmware AND actuator.pan_reversed is true: "
+                   "pan is reversed twice",
+                   flash + " Or set actuator.pan_reversed: false and redo the tape mark.")
+    if version < (3, 4):
         return Row("firmware", Status.WARN,
-                   f"{label}, pwm=ok, but no self-restart on a stalled camera",
-                   "Flash firmware/esp32_actuator from main (v3.2) when you can.")
+                   f"{label}, pwm=ok, but it lets pan reach the servo end stops "
+                   "(only the laptop keeps it at 20-160)",
+                   flash + " Then run serial_probe --servo-sweep and listen at each end.")
     return Row("firmware", Status.PASS, f"{label}, pwm=ok")
 
 

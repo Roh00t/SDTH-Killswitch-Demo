@@ -240,7 +240,7 @@ python -m tools.operator_console
 **Tests:**
 
 ```bash
-pytest tests/ -q        # 374 tests, zero hardware, ~7s
+pytest tests/ -q        # 385 tests, zero hardware, ~7s
 ```
 
 ---
@@ -624,7 +624,7 @@ Stated here so nobody has to discover them.
 - **Aimpoint offset is geometric, not semantic.** It biases within a detected box. It does
   not identify a rotor hub — a trained keypoint model behind the same interface would.
   Below `min_box_px` the solver reverts to centre-of-mass and says so in the audit log.
-- **180° pan arc.** Cues outside ±90° of boresight are rejected, not serviced.
+- **140° pan arc.** Cues outside ±70° of boresight are rejected, not serviced.
 - **Visible spectrum only.** No night, no degraded visibility, no hit-spot verification.
 - **The effector is an LED.** Every firmware guardrail is sized for a hazardous effector
   because the architecture claims this brain re-hosts onto one.

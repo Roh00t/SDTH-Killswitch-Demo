@@ -29,6 +29,7 @@ from tools.preflight import (
 
 V32 = "OK BOOT killswitch-actuator v3.2 pan_ch=1 tilt_ch=2 pwm=ok"
 V33 = "OK BOOT killswitch-actuator v3.3 pan_ch=1 tilt_ch=2 pwm=ok"
+V34 = "OK BOOT killswitch-actuator v3.4 pan_ch=1 tilt_ch=2 pwm=ok"
 URL = "http://10.244.153.41/stream"
 
 
@@ -100,16 +101,21 @@ class TestVersionParsing:
 
 
 class TestFirmwareVerdict:
-    def test_v32_passes(self):
-        assert firmware_verdict(V32, False, True, True).status is Status.PASS
+    def test_v34_passes(self):
+        assert firmware_verdict(V34, False, True, True).status is Status.PASS
+
+    def test_pre_v34_warns_that_pan_can_reach_the_end_stops(self):
+        row = firmware_verdict(V32, False, True, True)
+        assert row.status is Status.WARN
+        assert "end stops" in row.detail and "v3.4" in row.fix
 
     def test_v33_with_laptop_mirror_is_a_double_reversal(self):
         row = firmware_verdict(V33, False, pan_reversed=True, reset_requested=True)
         assert row.status is Status.FAIL
-        assert "twice" in row.detail and "v3.2" in row.fix
+        assert "twice" in row.detail and "v3.4" in row.fix
 
-    def test_v33_without_laptop_mirror_is_consistent(self):
-        assert firmware_verdict(V33, False, False, True).status is Status.PASS
+    def test_v33_without_laptop_mirror_still_warns_on_end_stops(self):
+        assert firmware_verdict(V33, False, False, True).status is Status.WARN
 
     def test_v2_is_the_old_pin_map(self):
         row = firmware_verdict("OK BOOT killswitch-actuator v2 pan_ch=1 tilt_ch=2 pwm=ok",
@@ -214,7 +220,7 @@ class TestCheckSerial:
 
     def test_healthy_board(self, monkeypatch):
         monkeypatch.setattr(preflight, "BOOT_LISTEN_S", 5.0)
-        port = FakePort([V32, "ST 90.0,90.0,0,0,812", f"CAM {URL}"])
+        port = FakePort([V34, "ST 90.0,90.0,0,0,812", f"CAM {URL}"])
         rows = check_serial(self.CFG, "c.yaml", reset=True,
                             opener=lambda name, baud: port, say=lambda _: None)
         assert [r.status for r in rows] == [Status.PASS] * 3

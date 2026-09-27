@@ -113,14 +113,26 @@ static const char* CAM_HOSTNAME = "killswitch-cam";   // http://killswitch-cam.l
 static const unsigned long BAUD               = 921600UL;
 
 // Actuator bounds. Also enforced host-side; twice is deliberate.
-static const float PAN_MIN   = 0.0f;
-static const float PAN_MAX   = 180.0f;
+//
+// Pan stops 20 deg short of each end ON PURPOSE. At 0/180 this map sends
+// 500/2400 us, past the mechanical end stop of many SG90s: the servo never
+// arrives, pushes against the stop at locked-rotor current (~700 mA) for as
+// long as the command is held, and strips its gears or burns its motor. SCAN
+// parks on each bound every sweep, and a target beyond travel holds the bound
+// for the whole track. A servo died on the rig under v3.2, which allowed
+// 0-180; this is the most likely way. 10-170 still buzzed at the 605 us end on the replacement (pan_reversed puts host 170 there). 20-160 is 700-2194 us. Tilt 45-135 is
+// 975-1925 us, far inside any SG90's stops; its limit is the bracket, so
+// watch for binding at 45 and 135 during serial_probe --servo-sweep.
+static const float PAN_MIN   = 20.0f;
+static const float PAN_MAX   = 160.0f;
 static const float TILT_MIN  = 45.0f;
 static const float TILT_MAX  = 135.0f;
 static const float STOW_PAN  = 90.0f;
 static const float STOW_TILT = 90.0f;
 
-// SG90 pulse widths. Calibrate per servo if travel is short or it buzzes at rest.
+// SG90 pulse widths. They set the degree scale only; the angle bounds above
+// are what keep the pulse off the end stops. Never widen the bounds to get
+// travel back: a servo buzzing at a bound is stalled, and stalls kill SG90s.
 static const int SERVO_MIN_US = 500;
 static const int SERVO_MAX_US = 2400;
 
@@ -134,6 +146,8 @@ static const unsigned long SERVO_UPDATE_MS    = 20UL;   // 50 Hz slew update
 
 // Max degrees per servo update -> ~250 deg/s. Limits inrush current and stops
 // the large-step commands that stall an SG90 and brown out a shared rail.
+// Do not slow it without retuning control.proportional_gain: the host's gains
+// assume this rate, and tools/simulator.py limit-cycles at 150-175 deg/s.
 static const float SLEW_RATE_DEG = 5.0f;
 // Below the SG90 deadband, writing only produces buzz and current draw.
 static const float DEADBAND_DEG  = 0.5f;
@@ -296,22 +310,10 @@ static void handleCommand(char* line, size_t length) {
       return;
     }
 
-    case 'T': {  // raw sweep, bypassing slew limiting and the deadband
-      lastCommandMs = millis();
-      Serial.println("OK T raw sweep starting");
-      for (int angle = 20; angle <= 160; angle += 10) {
-        servoPan.write(angle);
-        servoTilt.write(constrain(angle, (int)TILT_MIN, (int)TILT_MAX));
-        delay(120);
-      }
-      servoPan.write((int)STOW_PAN);
-      servoTilt.write((int)STOW_TILT);
-      currentPan = targetPan = STOW_PAN;
-      currentTilt = targetTilt = STOW_TILT;
-      lastCommandMs = millis();
-      Serial.println("OK T raw sweep done");
-      return;
-    }
+    // 'T' (raw sweep) was removed in v3.4. It wrote the servos directly,
+    // 10 deg every 120 ms, bypassing the slew limit, and blocked loop() (and
+    // with it the deadman) for ~2 s. It now answers E01 like any unknown verb.
+    // serial_probe --servo-sweep does the same job through the slew limiter.
 
     case 'A': {
       float pan, tilt;
@@ -406,7 +408,8 @@ static void checkBurnCeiling() {
 
 // --------------------------------------------------------------- motion ----
 
-/* Step current angles toward target at a bounded rate.
+/* Step current angles toward target at a bounded rate. The only place a
+ * servo is written after setup(): every move is slew-limited and clamped.
  *
  * SG90s have no position feedback, so "current" is the commanded angle and
  * nothing more. Rate limiting keeps inrush current down and avoids the large
@@ -488,6 +491,14 @@ static volatile int  wifiSeenRssi    = 0;    // 0: our SSID was not in the scan
 static volatile int  wifiSeenChannel = 0;
 static char          wifiNearby[4][33] = {}; // a few SSIDs the scan did hear
 static volatile int  wifiDropReason  = 0;    // last STA_DISCONNECTED reason
+// Associated with the access point, IP or not. Reason 0 alone cannot tell
+// "the router never answered" from "joined, but DHCP never gave an address".
+static volatile int  wifiLinkUp      = 0;
+static volatile int  wifiRejoins     = 0;    // watchdog restarts of the join
+// Not on Wi-Fi with an address for this long: drop the attempt and start over.
+// A join that has neither failed nor finished never raises a disconnect event,
+// so without this it waits forever (seen on the rig: 53 s, reason 0).
+static constexpr uint32_t WIFI_REJOIN_MS = 20000;
 
 #define STREAM_BOUNDARY "killswitchframe"
 
@@ -573,7 +584,13 @@ static void startStreamServer() {
 /* Arduino's Wi-Fi event task. Records why the hotspot dropped or refused us;
  * loop() turns it into words. Never prints: only loop() owns the UART. */
 static void onWifiDisconnected(WiFiEvent_t, WiFiEventInfo_t info) {
+  wifiLinkUp = 0;
   wifiDropReason = info.wifi_sta_disconnected.reason;
+}
+
+/* Same task. Associated with the access point; DHCP may still fail. */
+static void onWifiAssociated(WiFiEvent_t, WiFiEventInfo_t) {
+  wifiLinkUp = 1;
 }
 
 /* Core 0, before WiFi.begin(). Records whether the hotspot is audible at all.
@@ -594,10 +611,11 @@ static void scanForHotspot() {
   wifiScanCount.store(n, std::memory_order_release);   // after every write above
 }
 
-/* Core 0. Brings up the camera, the stream server and Wi-Fi, then exits.
- * setup() has already made the effector safe and started the servos, and
- * loop() is running on core 1 while this works, so a slow or failed camera
- * never delays a status frame or the deadman. */
+/* Core 0. Brings up the camera, the stream server and Wi-Fi, then stays as
+ * the Wi-Fi watchdog: every WIFI_REJOIN_MS without an address it restarts the
+ * join. setup() has already made the effector safe and started the servos,
+ * and loop() is running on core 1 while this works, so a slow or failed
+ * camera or network never delays a status frame or the deadman. */
 static void cameraTask(void*) {
   WiFi.setHostname(CAM_HOSTNAME);   // before mode(): applied when STA starts
   WiFi.mode(WIFI_STA);
@@ -612,15 +630,31 @@ static void cameraTask(void*) {
     cameraState = -1;
   }
   WiFi.onEvent(onWifiDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WiFi.onEvent(onWifiAssociated, ARDUINO_EVENT_WIFI_STA_CONNECTED);
   scanForHotspot();
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);   // non-blocking; loop() reports the IP
-  vTaskDelete(nullptr);
+
+  uint32_t joinStartMs = millis();
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    if (WiFi.status() == WL_CONNECTED) {
+      joinStartMs = millis();
+      continue;
+    }
+    if (millis() - joinStartMs < WIFI_REJOIN_MS) continue;
+    WiFi.disconnect();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    wifiRejoins = wifiRejoins + 1;
+    joinStartMs = millis();
+  }
 }
 
 /* ESP-IDF wifi_err_reason_t, by number so it builds on IDF 4.4 and 5.x. */
 static const char* wifiReasonText(int reason) {
   switch (reason) {
-    case 0:   return "still connecting";
+    case 0:   return "no answer from the router yet: weak signal?";
+    case 8:   return "left to retry the join";
     case 2:   return "authentication timed out: weak signal or wrong password";
     case 15:
     case 204: return "password rejected: check WIFI_PASSWORD, capitals included";
@@ -646,6 +680,8 @@ static void reportWifiScan(int networks) {
     Serial.print(" at ");
     Serial.print(wifiSeenRssi);
     Serial.println(" dBm, joining");
+    Serial.print("CAM wifi board MAC ");   // for a router that registers devices
+    Serial.println(WiFi.macAddress());
   } else {
     Serial.print("\" NOT FOUND among ");
     Serial.print(networks);
@@ -724,10 +760,21 @@ static void announceCamera() {
     lastWifiNoteMs = now;
     const int reason = wifiDropReason;
     Serial.print("CAM wifi not joined: ");
-    Serial.print(wifiReasonText(reason));
-    Serial.print(" (reason ");
-    Serial.print(reason);
-    Serial.println(")");
+    if (wifiLinkUp) {
+      Serial.print("joined the router but got NO IP ADDRESS: its DHCP is not"
+                   " answering (address pool full, or it wants this MAC registered)");
+    } else {
+      Serial.print(wifiReasonText(reason));
+      Serial.print(" (reason ");
+      Serial.print(reason);
+      Serial.print(")");
+    }
+    const int rejoins = wifiRejoins;
+    if (rejoins > 0) {
+      Serial.print(", rejoin ");
+      Serial.print(rejoins);
+    }
+    Serial.println();
   }
 }
 #endif
@@ -758,7 +805,7 @@ void setup() {
 
   // Report PWM attach state at boot. A failed attach is otherwise invisible:
   // every command still succeeds, no pulses are ever emitted.
-  Serial.print("OK BOOT killswitch-actuator v3.2 pan_ch=");
+  Serial.print("OK BOOT killswitch-actuator v3.5 pan_ch=");
   Serial.print(panChannel);
   Serial.print(" tilt_ch=");
   Serial.print(tiltChannel);

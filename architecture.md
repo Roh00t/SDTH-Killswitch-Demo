@@ -246,7 +246,7 @@ ever moves toward safety.
 
 ```
 [1] CUE        slew_to_cue → validate → cue_to_gimbal → IDLE→SCAN
-                 (azimuth outside the ±90° arc is REJECTED, not clamped)
+                 (azimuth outside the ±70° arc is REJECTED, not clamped)
 [2] SLEW       boustrophedon sweep, bounded by max_cycles
 [3] ACQUIRE    YOLOv11 → ByteTrack → select_priority_target → SCAN→TRACK
 [4] TRACK      AimpointSolver → AimpointPredictor leads by measured latency
@@ -338,7 +338,7 @@ Stated here so a judge never discovers them first.
    target size. Aimpoint offsets are angular, not metric.
 3. **Aimpoint offset is geometric, not semantic.** It biases within a box. It does not
    identify a rotor hub. A trained keypoint model behind the same interface would.
-4. **180° pan arc.** Cues outside ±90° of boresight are rejected, not serviced.
+4. **140° pan arc.** Cues outside ±70° of boresight are rejected, not serviced.
 5. **Visible spectrum only.** No night, no degraded visibility, no hit-spot verification.
 6. **Single node.** No multi-node deconfliction or fire distribution.
 7. **MQTT unauthenticated at transport in the demo config.** Payload validation and auth

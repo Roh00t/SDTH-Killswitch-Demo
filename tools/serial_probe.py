@@ -19,7 +19,15 @@ import time
 import yaml
 
 from helper.hardware.actuator import ActuatorError, SerialActuator, resolve_port
-from helper.hardware.protocol import BAUD_RATE
+from helper.hardware.protocol import (
+    BAUD_RATE,
+    PAN_MAX_DEG,
+    PAN_MIN_DEG,
+    TILT_MAX_DEG,
+    TILT_MIN_DEG,
+    clamp_pan,
+    clamp_tilt,
+)
 
 
 def list_ports() -> int:
@@ -85,13 +93,18 @@ def run_checks(port: str, pan_reversed: bool = False) -> int:
         s = actuator.last_status()
         check("firmware echoed the stow command", s is not None and abs(s.pan - 90.0) < 6.0)
 
+        # Sits at the bounds only long enough to read one status frame after
+        # the slew (80 deg at ~250 deg/s), then leaves. A bound is where a
+        # mis-calibrated servo stalls; never park there.
         print("\nBounds (commands are clamped, not wrapped)")
         actuator.set_angles(999.0, -999.0)
-        time.sleep(1.2)
+        time.sleep(0.8)
         s = actuator.last_status()
-        check("pan clamped to 180", s is not None and s.pan <= 180.5, f"got {s.pan if s else '?'}")
-        check("tilt clamped to 45", s is not None and s.tilt >= 44.5, f"got {s.tilt if s else '?'}")
         actuator.set_angles(90.0, 90.0)
+        check(f"pan clamped to {PAN_MAX_DEG:.0f}", s is not None and s.pan <= PAN_MAX_DEG + 0.5,
+              f"got {s.pan if s else '?'}")
+        check(f"tilt clamped to {TILT_MIN_DEG:.0f}", s is not None and s.tilt >= TILT_MIN_DEG - 0.5,
+              f"got {s.tilt if s else '?'}")
         time.sleep(0.8)
 
         print("\nArming interlock")
@@ -171,16 +184,18 @@ def servo_sweep(port: str, pan_reversed: bool = False) -> int:
             s = actuator.last_status()
             print(f"commanded pan={s.pan:5.1f} tilt={s.tilt:5.1f}" if s else "no status")
 
-        print("PAN axis (GPIO 14) — should swing left/right")
+        print("PAN axis (GPIO 14) — should swing left/right.")
+        print("LISTEN at each end: a steady buzz or whine means the servo is pushing")
+        print("against its stop. Press Ctrl+C at once and report it; do not rerun.\n")
         move("centre", 90.0, 90.0)
-        move("pan hard left  (0 deg)", 5.0, 90.0, 2.5)
-        move("pan hard right (180 deg)", 175.0, 90.0, 3.0)
-        move("pan centre", 90.0, 90.0, 2.5)
+        move(f"pan full left  ({PAN_MIN_DEG:.0f} deg)", PAN_MIN_DEG, 90.0, 1.5)
+        move(f"pan full right ({PAN_MAX_DEG:.0f} deg)", PAN_MAX_DEG, 90.0, 1.5)
+        move("pan centre", 90.0, 90.0, 1.5)
 
-        print("\nTILT axis (GPIO 21) — should tip up/down")
-        move("tilt down (45 deg)", 90.0, 48.0, 2.5)
-        move("tilt up   (135 deg)", 90.0, 132.0, 3.0)
-        move("tilt centre", 90.0, 90.0, 2.5)
+        print("\nTILT axis (GPIO 21) — should tip up/down. Watch the bracket for binding.")
+        move(f"tilt down ({TILT_MIN_DEG:.0f} deg)", 90.0, TILT_MIN_DEG, 1.5)
+        move(f"tilt up   ({TILT_MAX_DEG:.0f} deg)", 90.0, TILT_MAX_DEG, 1.5)
+        move("tilt centre", 90.0, 90.0, 1.5)
 
         print("\nBOTH axes together")
         move("diagonal A", 40.0, 60.0, 2.5)
@@ -200,6 +215,13 @@ NOTHING moved, no sound at all
       ground the PWM signal has no reference and the servo ignores it.
     - Check the supply is switched on and the barrel/USB connector is seated.
 
+It moved, but BUZZED or strained at one end
+    The servo hit its stop before the pulse ran out: it is stalling there,
+    and a stall held for seconds is what kills an SG90. Stop using the rig.
+    Pull PAN_MIN/PAN_MAX (or TILT_MIN/TILT_MAX) in by 5 deg in BOTH
+    firmware/esp32_actuator/esp32_actuator.ino and helper/hardware/protocol.py,
+    reflash, and rerun this. On tilt it may be the bracket, not the servo.
+
 NOTHING moved but you hear buzzing or feel the horn straining
     Power is present but sagging. Two SG90s stall-draw ~700mA each.
     - A phone charger rated under 2A will brown out under load.
@@ -212,9 +234,9 @@ ONE axis moved, the other did not
       if it stays on the same axis it is that servo or that GPIO.
 
 Movement is jerky or it jumps to an end stop and sticks
-    Likely a pulse-width mismatch. Adjust SERVO_MIN_US / SERVO_MAX_US in
-    firmware/esp32_actuator/esp32_actuator.ino (currently 500-2400us) and
-    reflash.
+    Likely a pulse-width mismatch. Unplug the servo supply now, then narrow
+    the angle bounds as above. Never widen SERVO_MIN_US / SERVO_MAX_US
+    (500-2400us) or the bounds to get travel back.
 """)
         return 0
     except ActuatorError as exc:
@@ -231,8 +253,9 @@ def interactive(port: str, pan_reversed: bool = False) -> int:
         actuator.connect()
         print("\nCommands:")
         print("  a <pan> <tilt>  absolute angles      d   firmware PWM diagnostics")
-        print("  arm / disarm    arming interlock     t   RAW sweep (bypasses slew")
-        print("  on / off        effector                 limiting and deadband)")
+        print(f"  arm / disarm    arming interlock         (pan {PAN_MIN_DEG:.0f}-{PAN_MAX_DEG:.0f},"
+              f" tilt {TILT_MIN_DEG:.0f}-{TILT_MAX_DEG:.0f})")
+        print("  on / off        effector")
         print("  z               e-stop               s   status      q  quit\n")
         while True:
             try:
@@ -246,7 +269,10 @@ def interactive(port: str, pan_reversed: bool = False) -> int:
                 if verb == "q":
                     break
                 elif verb == "a" and len(parts) == 3:
-                    actuator.set_angles(float(parts[1]), float(parts[2]))
+                    pan, tilt = float(parts[1]), float(parts[2])
+                    if (clamp_pan(pan), clamp_tilt(tilt)) != (pan, tilt):
+                        print(f"  clamped to {clamp_pan(pan):.1f} {clamp_tilt(tilt):.1f}")
+                    actuator.set_angles(pan, tilt)
                 elif verb == "arm":
                     actuator.arm()
                 elif verb == "disarm":
@@ -262,10 +288,6 @@ def interactive(port: str, pan_reversed: bool = False) -> int:
                 elif verb == "d":
                     actuator.send_raw("D")
                     time.sleep(0.4)   # let the reader surface the DIAG line
-                elif verb == "t":
-                    print("  raw sweep — watch the gimbal for ~2s")
-                    actuator.send_raw("T")
-                    time.sleep(2.5)
                 else:
                     print("  ?")
             except (ActuatorError, ValueError) as exc:

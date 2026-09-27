@@ -20,6 +20,10 @@ from helper.hardware.protocol import (
     HEARTBEAT_INTERVAL_S,
     PAN_MAX_DEG,
     PAN_MIN_DEG,
+    PARK_TIMEOUT_S,
+    PARK_TOLERANCE_DEG,
+    TILT_MAX_DEG,
+    TILT_MIN_DEG,
     ActuatorStatus,
     clamp_pan,
     clamp_tilt,
@@ -190,6 +194,8 @@ class SerialActuator(ActuatorDriver):
         connect_timeout: float = CONNECT_TIMEOUT_S,
         boot_settle_s: float = BOOT_SETTLE_S,
         pan_reversed: bool = False,
+        stow_pan_deg: float = (PAN_MIN_DEG + PAN_MAX_DEG) / 2.0,
+        stow_tilt_deg: float = (TILT_MIN_DEG + TILT_MAX_DEG) / 2.0,
     ) -> None:
         """Configure the link. Does not open it; call `connect()`.
 
@@ -210,9 +216,13 @@ class SerialActuator(ActuatorDriver):
                 status frame, so nothing above this driver sees the servo's
                 own sense. Bounds hold: they are clamped before mirroring, and
                 the firmware clamps again.
+            stow_pan_deg: Pan that `close()` parks at before releasing the
+                port, in the host's sense (mirrored like any other command).
+            stow_tilt_deg: Tilt that `close()` parks at.
         """
         self._port_name = port
         self._pan_reversed = pan_reversed
+        self._stow = (clamp_pan(stow_pan_deg), clamp_tilt(stow_tilt_deg))
         self._baud = baud
         self._connect_timeout = connect_timeout
         self._boot_settle_s = boot_settle_s
@@ -483,11 +493,39 @@ class SerialActuator(ActuatorDriver):
         """False once the link has faulted."""
         return self._running.is_set()
 
+    def _park(self) -> None:
+        """Slew to stow and wait, bounded, for the firmware to report it.
+
+        Best effort: a dead link or a slow board logs and returns. Called by
+        `close()` on the caller's thread, while the heartbeat still runs.
+        """
+        if not (self._link_established and self._running.is_set()):
+            return
+        try:
+            self.set_angles(*self._stow)
+        except ActuatorError as exc:
+            logger.warning("Could not park the gimbal at stow: %s", exc)
+            return
+        deadline = time.monotonic() + PARK_TIMEOUT_S
+        while time.monotonic() < deadline:
+            status = self.last_status()
+            if (status is not None
+                    and abs(status.pan - self._stow[0]) <= PARK_TOLERANCE_DEG
+                    and abs(status.tilt - self._stow[1]) <= PARK_TOLERANCE_DEG):
+                return
+            time.sleep(HEARTBEAT_INTERVAL_S / 2.0)
+        logger.warning("Gimbal did not report stow within %.1f s", PARK_TIMEOUT_S)
+
     def close(self) -> None:
-        """De-energise, stop threads, release the port. Idempotent."""
+        """De-energise, park at stow, stop threads, release the port. Idempotent.
+
+        Effector first, then the gimbal: parking only ever follows a confirmed
+        or attempted e-stop, and a park failure never blocks the release.
+        """
         if self._serial is not None:
             self.emergency_stop()
             self.confirm_effector_off(timeout=0.3)
+            self._park()
 
         self._running.clear()
         for thread in (self._reader, self._heartbeat):

@@ -29,7 +29,7 @@ none of the safety decisions live there.
 | Burn ceiling | 2000 ms | **2002 ms** | Cut regardless of what the host commands |
 | Boot e-stop latch | — | — | Latched at boot; refuses to fire until deliberately armed |
 | Two-key arming | — | — | `L1` rejected (E04) without a prior `M1` |
-| Bounds clamp | pan 0–180, tilt 45–135 | — | Clamped again before PWM write |
+| Bounds clamp | pan 20–160, tilt 45–135 (pan stops short of the SG90 end stops) | — | Clamped again before PWM write |
 
 - `[HARD]` `setup()` sets `PIN_EFFECTOR` OUTPUT and LOW as its **literal first statement**,
   before `Serial.begin()`, before servo attach, before anything that can block or fault.

@@ -91,7 +91,7 @@ scan:
   settle_s: 0.5
   looks_per_stop: 2
   max_cycles: 2
-  # Azimuth the gimbal faces at pan centre. Cues outside +/-90 of this are
+  # Azimuth the gimbal faces at pan centre. Cues outside +/-70 of this are
   # rejected, not clamped.
   boresight_azimuth_deg: 0.0
 

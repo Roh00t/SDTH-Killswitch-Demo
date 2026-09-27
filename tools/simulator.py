@@ -28,6 +28,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 from helper.hardware.actuator import ActuatorDriver, MockActuator
+from helper.hardware.protocol import PAN_MAX_DEG, PAN_MIN_DEG, TILT_MAX_DEG, TILT_MIN_DEG
 from helper.state.control import ControlGains, compute_correction
 from helper.vision.aimpoint import AimpointSolver
 from helper.vision.detector import Detector
@@ -35,7 +36,8 @@ from helper.vision.predictor import AimpointPredictor
 from helper.vision.types import Detection
 
 # SG90: ~100 ms per 60 degrees -> ~600 deg/s unloaded. Firmware rate-limits to
-# ~250 deg/s, which is the effective ceiling and what we model.
+# ~250 deg/s, which is the effective ceiling and what we model. The control
+# gains are tuned against it: at 150-175 deg/s this sim limit-cycles.
 SERVO_SLEW_DEG_PER_S: float = 250.0
 
 
@@ -52,10 +54,10 @@ class SimulatedGimbal:
     actual_tilt: float = 90.0
     commanded_pan: float = 90.0
     commanded_tilt: float = 90.0
-    pan_min: float = 0.0
-    pan_max: float = 180.0
-    tilt_min: float = 45.0
-    tilt_max: float = 135.0
+    pan_min: float = PAN_MIN_DEG
+    pan_max: float = PAN_MAX_DEG
+    tilt_min: float = TILT_MIN_DEG
+    tilt_max: float = TILT_MAX_DEG
 
     def command(self, pan: float, tilt: float) -> None:
         """Absolute command, clamped as the driver and firmware both clamp."""
@@ -461,7 +463,7 @@ def main() -> int:
                   f"{b:.2f}px -> {a:.2f}px ({(1 - a / b) * 100:.1f}%)")
 
     # 150 ticks at 50 Hz = 3 s; at 20 deg/s that is 60 deg of travel, which
-    # stays inside the 180 deg pan arc.
+    # stays inside the 140 deg pan arc.
     ab_test(f"3. Crossing target at {args.target_speed:.0f} deg/s — prediction A/B",
             lambda: SimulatedTarget(azimuth_deg=100.0, elevation_deg=90.0,
                                     az_rate_deg_s=args.target_speed), 150)

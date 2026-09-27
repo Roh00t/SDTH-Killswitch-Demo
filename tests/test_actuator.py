@@ -288,7 +288,7 @@ class TestPanReversed:
     def test_out_of_range_is_clamped_before_mirroring(self):
         act = self._actuator(True)
         act.set_angles(999.0, -999.0)
-        assert b"A000.0,045.0" in act._serial.written[0]
+        assert b"A020.0,045.0" in act._serial.written[0]   # 160, mirrored
 
     def test_status_comes_back_in_the_hosts_sense(self):
         act = self._actuator(True, [b"ST 135.0,97.0,0,0,1234\n"])
@@ -308,3 +308,90 @@ class TestPanReversed:
         assert load_pan_reversed(str(off)) is False
         assert load_pan_reversed(str(tmp_path / "missing.yaml")) is False
         assert load_pan_reversed("config/fallback.yaml") is True
+
+
+class TestServoEndStops:
+    """A servo was destroyed on the rig. Pulses past an SG90's mechanical stop
+    stall it at locked-rotor current for as long as the command is held."""
+
+    FIRMWARE = "firmware/esp32_actuator/esp32_actuator.ino"
+
+    def _firmware_float(self, name: str) -> float:
+        import re
+        from pathlib import Path
+
+        text = Path(self.FIRMWARE).read_text(encoding="utf-8")
+        match = re.search(rf"static const float {name}\s*=\s*([0-9.]+)f;", text)
+        assert match, f"{name} not found in firmware"
+        return float(match.group(1))
+
+    def test_firmware_and_host_bounds_agree(self):
+        """Rule 9: two authorities, one set of numbers."""
+        assert self._firmware_float("PAN_MIN") == PAN_MIN_DEG
+        assert self._firmware_float("PAN_MAX") == PAN_MAX_DEG
+        assert self._firmware_float("TILT_MIN") == TILT_MIN_DEG
+        assert self._firmware_float("TILT_MAX") == TILT_MAX_DEG
+
+    def test_pan_never_reaches_the_sg90_end_stops(self):
+        """0/180 is 500/2400 us: past many SG90s' stops. The replacement still stalled at 10/170; keep 20 deg clear."""
+        assert PAN_MIN_DEG >= 20.0 and PAN_MAX_DEG <= 160.0
+        assert PAN_MIN_DEG + PAN_MAX_DEG == 180.0   # mirror_pan and stow rely on it
+
+    def test_firmware_has_no_raw_servo_write_outside_the_slew_limiter(self):
+        """The old 'T' sweep wrote servos directly and blocked the deadman."""
+        import re
+        from pathlib import Path
+
+        text = Path(self.FIRMWARE).read_text(encoding="utf-8")
+        assert "case 'T'" not in text
+        body = text.split("void setup()")[0]
+        writes = re.findall(r"servo(?:Pan|Tilt)\.write\(", body)
+        assert len(writes) == 2, "only updateServos() may write a servo after boot"
+
+    class _Port:
+        def __init__(self):
+            self.written, self.closed = [], False
+
+        def write(self, payload):
+            self.written.append(payload)
+
+        def close(self):
+            self.closed = True
+
+    def _linked(self, **kwargs):
+        import time
+
+        from helper.hardware.actuator import SerialActuator
+        from helper.hardware.protocol import ActuatorStatus
+
+        act = SerialActuator("COM3", **kwargs)
+        port = self._Port()
+        act._serial = port
+        act._link_established = True
+        act._running.set()
+        # A fresh frame already at stow, so neither wait runs to its timeout.
+        act._last_status = ActuatorStatus(90.0, 90.0, False, False, 1, time.monotonic() + 5)
+        return act, port
+
+    def test_close_parks_at_stow_after_the_estop(self):
+        act, port = self._linked(pan_reversed=True)
+        act.close()
+        assert port.written[0] == b"Z\n", "effector first, always"
+        assert b"A090.0,090.0\n" in port.written[1:]
+        assert port.closed
+
+    def test_close_parks_at_the_configured_stow_mirrored(self):
+        import time
+
+        from helper.hardware.protocol import ActuatorStatus
+
+        act, port = self._linked(pan_reversed=True, stow_pan_deg=60.0, stow_tilt_deg=100.0)
+        act._last_status = ActuatorStatus(60.0, 100.0, False, False, 1, time.monotonic() + 5)
+        act.close()
+        assert b"A120.0,100.0\n" in port.written
+
+    def test_close_on_a_dead_link_does_not_park(self):
+        act, port = self._linked()
+        act._running.clear()
+        act.close()
+        assert not any(w.startswith(b"A") for w in port.written)

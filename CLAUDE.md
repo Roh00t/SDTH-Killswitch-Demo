@@ -81,7 +81,7 @@ blocker is below with what was done about it; none of them vanished.
 
 Onboard inference is not a third option: YOLO11s does not run on an S3.
 
-### HITL verification status — MUST BE RE-RUN after the v3 rewire
+### HITL verification status — MUST BE RE-RUN after the v3 rewire (now on v3.4)
 
 `python -m tools.serial_probe --port COM3` — **13/13 PASS** on the Windows rig, with
 firmware v2 on the **old pins (5/6/7)**. Firmware v3 moved every actuator pin and added
@@ -94,7 +94,7 @@ actuator path is **not** verified.
 |---|---|
 | Link | CH343 bridge on `COM3`, 921600 baud, `ActuatorStatus` frames clean — no drops, no checksum failures |
 | Boot state | Effector de-energised and disarmed at boot (e-stop latched) |
-| Bounds | Out-of-range commands clamped, not wrapped: pan → 180, tilt → 45 |
+| Bounds | Out-of-range commands clamped, not wrapped: pan → 180, tilt → 45 (v2 bounds; v3.4 clamps pan to 170) |
 | Arming interlock | Fire refused while disarmed; `M1` accepted; effector energises only once armed |
 | De-energise | Effector off on command, confirmed by status frame |
 | Burn ceiling | Firmware cut the burn at `MAX_BURN_MS` without host involvement |
@@ -172,13 +172,27 @@ dashboard frame with plain `json.dumps`.
 ### Pan/tilt bounds are not configurable — on purpose
 
 No YAML file defines them, and none should. The limits live in
-`helper/hardware/protocol.py` (`PAN_MIN_DEG` 0, `PAN_MAX_DEG` 180, `TILT_MIN_DEG` 45,
+`helper/hardware/protocol.py` (`PAN_MIN_DEG` 10, `PAN_MAX_DEG` 170, `TILT_MIN_DEG` 45,
 `TILT_MAX_DEG` 135) and again in `esp32_actuator.ino`, which is architectural rule 9:
 bounds enforced twice, host-side before transmit and firmware before the PWM write. A
 config knob would be a third authority that the firmware does not honour. What the config
 *does* hold is `scan.pan_step_deg` / `tilt_step_deg` (sweep granularity),
 `scan.boresight_azimuth_deg` (cue geometry) and `actuator.stow_pan_deg` / `stow_tilt_deg`
-(the safe-harbour pose) — none of which are limits.
+(the safe-harbour pose) — none of which are limits. `test_firmware_and_host_bounds_agree`
+reads the `.ino` and fails if the two copies drift.
+
+**Pan stops 20 deg short of each end because a servo died.** Firmware maps 0-180 to
+500-2400 us, and on many SG90s 500/2400 is past the mechanical stop: the servo pushes
+against it at locked-rotor current (~700 mA) for as long as the command is held. SCAN
+parks on every bound, a target beyond travel holds the bound for the whole track, and
+`serial_probe` drove to 180 on every run; under v3.2's 0-180 a servo on the rig was
+destroyed, and the replacement still buzzed at 10-170 (605 us end). 20-160 is 700-2194 us. **Never widen the bounds or `SERVO_MIN_US`/`MAX_US`
+to get travel back.** If `serial_probe --servo-sweep` buzzes at an end, pull that bound
+in, in both files. Firmware v3.4 also removed the `T` raw sweep, which wrote the servos
+directly past the slew limiter and blocked the deadman for ~2 s, and
+`SerialActuator.close()` now slews to stow after the e-stop so the next reset's unslewed
+`setup()` stow is not a full-speed jump. The slew stays at 250 deg/s: the control gains
+are tuned to it, and the simulator limit-cycles at 150-175.
 
 Weights train on **Google Colab**, land as `.pt`/`.onnx`, and are **gitignored**.
 
@@ -215,10 +229,11 @@ python -m tools.preflight --config config/bench.yaml  # broker, COM3, firmware v
 python -m tools.camera_probe --config config/fallback.yaml  # configured index FOUND?, fps, BUFFERSIZE
 python -m tools.camera_probe --config config/fallback.yaml --find --write  # locate the ESP32 camera, set stream_url
 python -m tools.serial_probe --port <dev>           # every firmware interlock
+python -m tools.laser_test                          # bench only, node stopped: L toggles the laser
 python -m tools.operator_console                    # C2 dashboard, SPACE to authorise
 python -m tools.simulator                           # closed-loop convergence proof
 python main.py --config config/fallback.yaml --sim-target  # hardware-free demo, real MQTT
-pytest tests/ -q                                    # 374 tests, zero hardware
+pytest tests/ -q                                    # 385 tests, zero hardware
 ```
 
 Run everything **from the repo root**.
@@ -324,20 +339,21 @@ a human reads.
 
 ## Testing
 
-374 tests, all hardware-free, ~2 s.
+385 tests, all hardware-free, ~2 s.
 
 | File | Covers |
 |---|---|
 | `test_aimpoint.py` | Offset math, clamping, resolution gate, target selection |
 | `test_comms.py` | Payload validation, hostile inputs, token handling, operator task parser |
-| `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop, held-port hint, pan reversal both ways |
+| `test_actuator.py` | Framing, checksums, bounds, arming interlock, e-stop, held-port hint, pan reversal both ways, firmware/host bounds agree and clear the SG90 end stops, no raw servo writes in firmware, park at stow on close |
 | `test_state_machine.py` | Transition table, sweep bounds, step-and-stare scan, cue geometry, prediction, auth-window telemetry, forced-IDLE safing, stale-auth drain |
 | `test_closed_loop.py` | Control-loop convergence against a simulated gimbal |
 | `test_cot.py` | CoT wire format, hostile input, geodesy, bridge priority, unicast, stale pad, honest map labels, last-will, dashboard socket, dashboard opens itself from disk, dashboard NO LINK, strict-JSON frames, operator tasking and topic routing |
 | `test_camera_probe.py` | Configured camera index FOUND / NOT FOUND, per-OS no-camera hints, `--find` against the firmware's stream format, `--write` keeping every comment |
 | `test_stream_source.py` | Wi-Fi camera: newest frame, reconnect, unhealthy on loss then healthy again when frames return, flip, bare-address completion, real MJPEG decode of the firmware's format |
 | `test_sim_scene.py` | `--sim-target` scene: refuses a real actuator, closes the loop, fresh ids on reset |
-| `test_preflight.py` | Firmware version verdicts (v3.3 + `pan_reversed` double mirror), RTS reset pulse with DTR held low, boot reader sends nothing, camera address match, one-viewer stream retry, detection hit ratio and what the model saw instead |
+| `test_laser_test.py` | Bench laser tool: toggle arms then fires, off when already off, notices the firmware's 2 s cut, shutdown leaves it off and disarmed |
+| `test_preflight.py` | Firmware version verdicts (v3.3 + `pan_reversed` double mirror, pre-v3.4 end-stop warning), RTS reset pulse with DTR held low, boot reader sends nothing, camera address match, one-viewer stream retry, detection hit ratio and what the model saw instead |
 
 **Unit tests are necessary but not sufficient.** Five real bugs were found only by running
 the whole node in mock mode — duration logging, mock free-running, wrong teardown verb,

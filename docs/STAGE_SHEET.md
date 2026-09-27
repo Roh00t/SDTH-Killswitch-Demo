@@ -17,7 +17,7 @@ on the gimbal, streaming to the laptop over Wi-Fi (firmware v3).
 - [ ] The laser can only be on in **ENGAGE**, after SPACE. The host burns 1.8 s, the
   firmware cuts at 2.0 s, and the firmware's deadman cuts 250 ms after the laptop goes
   silent.
-- [ ] A matte backstop sits behind the target. The gimbal's pan arc (0–180°) faces the
+- [ ] A matte backstop sits behind the target. The gimbal's pan arc (20–160°) faces the
   backstop, **never the audience**.
 - [ ] The target moves **only while the STATE pill reads SCAN or TRACK**, pushed by its
   stand's base from the side.
