@@ -14,6 +14,10 @@ Singapore Defence Tech Hackathon. It is the **targeting brain, not the turret**:
 hardware-agnostic layer that finds, tracks, predicts and holds a beam on a manoeuvring
 drone, running on COTS hardware and gated by a human authorisation state.
 
+**Status: submitted to the hackathon on 27 September 2026**: pitch deck
+(`Pitch_Deck_KILLSWITCH.pdf`), product video and prototype demo video (`video-demo/`).
+See README, *Submission*. Awaiting results.
+
 Refactored from a legacy Raspberry Pi bird deterrent (`upstream` remote). Legacy code is
 being deleted, not extended. `picamera2`, `gpiozero`, `pigpio`, audio triggering and the
 `YoloV5_*` wrappers are all legacy — not patterns to follow.
@@ -43,6 +47,17 @@ null. See *The camera on the ESP32: what it costs* below.
 bridge stays enumerated across ESP32 resets; native USB re-enumerates and takes the
 host's serial handle with it. `_BRIDGE_HINTS` in `helper/hardware/actuator.py` matches
 the CH343 family and deliberately does *not* match `USB Serial Device`.
+
+**Flash with Tools → USB CDC On Boot = Disabled.** Enabled sends `Serial` to the native
+USB port. The board then boots, streams its camera and moves nothing, while `COM3` stays
+silent: the node dies at startup with no status frames and the dashboard reads NO LINK.
+The ROM boot log still appears on `COM3` at 115200, which is how to tell this apart from a
+dead link. It happened on the rig on 27 September 2026.
+
+**Firmware v3.5 restarts a stuck Wi-Fi join.** After 20 s without an address it drops the
+attempt and joins again, and it says which stage failed: `no answer from the router` (never
+associated) or `joined the router but got NO IP ADDRESS` (DHCP refused it; the router may
+need the board's MAC, printed at boot as `CAM wifi board MAC`).
 
 ### The camera on the ESP32: what it costs
 
@@ -81,14 +96,19 @@ blocker is below with what was done about it; none of them vanished.
 
 Onboard inference is not a third option: YOLO11s does not run on an S3.
 
-### HITL verification status — MUST BE RE-RUN after the v3 rewire (now on v3.4)
+### HITL verification status (firmware v3.5, at submission)
 
-`python -m tools.serial_probe --port COM3` — **13/13 PASS** on the Windows rig, with
+**Verified on v3.4/v3.5, 27 September 2026:** `serial_probe --servo-sweep` quiet at pan
+20/160 and tilt 45/135; `tools.preflight` passes serial, firmware, camera address and
+stream; the live node runs on the real board, camera and detector, the gimbal physically
+scans on bridge cues, and the dashboard reads PHYSICAL GIMBAL.
+
+`python -m tools.serial_probe --port COM3`: **13/13 PASS** on the Windows rig, but with
 firmware v2 on the **old pins (5/6/7)**. Firmware v3 moved every actuator pin and added
-the camera. Until 13/13 passes again on v3, with a browser holding the stream open, the
-actuator path is **not** verified.
+the camera. Until 13/13 passes again on v3.5, with a browser holding the stream open, the
+firmware interlocks are **not** verified on current firmware.
 
-**Verified:**
+**Verified by 13/13 on v2:**
 
 | Area | Covered |
 |---|---|
@@ -111,9 +131,10 @@ measured travel.
 
 **Remaining before the stack is integration-ready:**
 
-- The vision pipeline on the rig — YOLO lock against a real target through the host webcam.
-- The C2 plane end to end: bridge, dashboard, and one clean authorisation through
-  `SPACE` → `ENGAGE` → `ENGAGEMENT COMPLETE`.
+- 13/13 on firmware v3.5, with the stream open.
+- A YOLO lock on the rig. At the last preflight the model did not detect the drone photo.
+- One clean authorisation on the rig through `SPACE` → `ENGAGE` → `ENGAGEMENT COMPLETE`.
+  The bridge, dashboard and live node are otherwise proven together.
 
 > `serial_probe --port COM3` **fires the effector**, a KY-008 laser. Its checks read the
 > firmware's reported state, not light: a laser wired with `S` on the collector never lit

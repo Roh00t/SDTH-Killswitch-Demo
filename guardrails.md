@@ -3,7 +3,8 @@
 **This document is binding.** Where it conflicts with convenience, performance, or a
 demo deadline, this document wins.
 
-The bench effector is an eye-safe LED. Every guardrail is sized for a hazardous effector
+The bench effector is a KY-008 650 nm laser module: low power, but not eye-safe. It
+replaced an LED. Every guardrail is sized for a hazardous effector
 on purpose: the architecture claims this brain re-hosts onto a real one, and that claim
 is only credible if the safety logic was built for it from the start.
 
@@ -50,7 +51,8 @@ it — not to make recovery require a power cycle.
 
 `[HARD]` The barrier requiring human action is the **physical interlock in series with
 the effector** — a key switch or removable link. No software path can clear it. On the
-bench with an LED this is optional; with any hazardous effector it is mandatory.
+bench with an LED this was optional. The KY-008 is past that line: fit one before any run
+with people downrange.
 
 `[HARD]` `MockActuator` mirrors these semantics exactly. It once raised on
 arm-after-e-stop while the firmware cleared the latch — the mock was validating fiction.

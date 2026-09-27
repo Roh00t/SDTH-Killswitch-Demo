@@ -9,6 +9,38 @@ Singapore Defence Tech Hackathon
 
 ---
 
+## Submission
+
+**Singapore Defence Tech Hackathon. Submitted 27 September 2026. Awaiting results.**
+
+| Deliverable | File | What it is |
+|---|---|---|
+| Pitch deck | [`Pitch_Deck_KILLSWITCH.pdf`](Pitch_Deck_KILLSWITCH.pdf) | 8 slides, *Reversing the economic death spiral of modern air defense*, in collaboration with Group Sentinels: scenario, air defence today, the problem, the solution, simulation, how it works, team |
+| Product video | [`video-demo/killswitch_product_video.mp4`](video-demo/killswitch_product_video.mp4) | 42 s, 1280×720. Animated concept film: the Killswitch network over Singapore, the cost and dwell-time case for low-power lasers, rooftop and ground implementations, the team |
+| Prototype demo video | [`video-demo/protoptype_demo_video.mp4`](video-demo/protoptype_demo_video.mp4) | 16 s, 4K. Split screen: the physical rig from above (ESP32-S3 with its OV5640 camera, two SG90s on pan/tilt, KY-008 laser) beside the live C2 dashboard radar, the gimbal turning as the bridge cues it from threat to threat |
+
+`protoptype_demo_video.mp4` is spelled as submitted and left that way, so the repo matches
+what the judges received.
+
+Also in the repo:
+
+- [`video/`](video/): the product video's source. Script
+  [`KILLSWITCH_30s_promotional_pitch.md`](video/KILLSWITCH_30s_promotional_pitch.md), Manim
+  scenes `manim_code.py`, notebook `SDTH_Video.ipynb`, team photos.
+- [`report/Killswitch_Report.docx`](report/Killswitch_Report.docx): the written report.
+- [`image/`](image/): block diagram and control-flow figures.
+
+### Team
+
+| Name | Role |
+|---|---|
+| Aadith Yadav G | Simulations and video |
+| Rohit Panda | Software |
+| Evan Tok | Hardware |
+| Thejus Aravind | Video and pitch |
+
+---
+
 ## The Problem
 
 A US$500 drone gets intercepted by a US$100,000 missile or a US$1.5M turret. That is an
@@ -297,26 +329,23 @@ which re-enumerates on every board reset and kills the host's serial handle mid-
 
 ### Hardware verification log
 
-**Actuator path — COMPLETE.** `python -m tools.serial_probe --port COM3` passes
-**13/13** on the Windows rig: CH343 bridge at 921600 baud with clean `ActuatorStatus`
-framing, effector de-energised and disarmed at boot, out-of-range commands clamped to
-pan 180 / tilt 45, fire refused while disarmed, arming accepted, effector energised only
-once armed and de-energised on command, firmware burn ceiling cut without host
-involvement, and the 250 ms deadman cutting the effector *and* dropping arming.
-Positioning confirmed separately via `--interactive` (`a <pan> <tilt>`).
+State at submission (27 September 2026), firmware **v3.5**:
 
-> The two bounds checks read **commanded** angles from the status frame — SG90s have no
-> position feedback, and `run_checks()` notes that its gimbal section "passes even with no
-> servos attached." 13/13 proves the firmware clamps correctly. Physical travel to the
-> stops is confirmed by watching the gimbal, not by the pass count. Do not quote the clamp
-> result as measured travel.
-
-**Still outstanding before the stack is integration-ready:**
-
-| Gap | Why it matters |
+| Area | Status |
 |---|---|
-| Vision pipeline untested on the rig | YOLO lock against a real target through the host webcam |
-| C2 plane untested end to end | Bridge, dashboard, and one clean `SPACE` → `ENGAGE` → `ENGAGEMENT COMPLETE` |
+| Link and firmware | CH343 on `COM3` at 921600 baud, clean status frames. `tools.preflight` passes weights, broker, serial, firmware (`v3.5, pwm=ok`), camera address and stream |
+| Camera | OV5640 streams 640×480 from the ESP32-S3 to the host over Wi-Fi, 10–22 fps |
+| Gimbal travel | `serial_probe --servo-sweep` quiet at pan 20 and 160, tilt 45 and 135. Pan was narrowed from 0–180 after a servo stalled against its end stop and died; see `CLAUDE.md` |
+| Live node | `main.py` on the real board, camera and detector. The bridge cues it, the gimbal physically scans, and the dashboard reads **PHYSICAL GIMBAL** with live telemetry |
+| Firmware interlocks (13/13) | Passed on firmware v2, on the old pins 5/6/7. **Not yet re-run on v3.x** |
+| Vision lock on the rig | **Not yet verified.** The last preflight did not detect the drone photo |
+| `SPACE` → `ENGAGE` → `ENGAGEMENT COMPLETE` on the rig | **Not yet verified** |
+
+> The 13/13 bounds checks read **commanded** angles from the status frame. SG90s have no
+> position feedback, and `run_checks()` notes that its gimbal section "passes even with no
+> servos attached." 13/13 proves the firmware clamps correctly. Physical travel is confirmed
+> by watching the gimbal, not by the pass count. Do not quote the clamp result as measured
+> travel.
 
 > ⚠️ `serial_probe --port COM3` **fires the effector** — a KY-008 laser, not the LED the
 > console prints still describe. Two ~0.5 s pulses, a 2.6 s burn-ceiling test, then a
@@ -611,6 +640,9 @@ survives a broker outage.
 | [architecture.md](architecture.md) | Topology, concurrency model, state machine, latency budget, known limits |
 | [guardrails.md](guardrails.md) | Binding safety constraints — read before touching the effector path |
 | [CLAUDE.md](CLAUDE.md) | Conventions and context for AI-assisted development |
+| [COMMANDS.md](COMMANDS.md) | Bring the whole system live, in order |
+| [docs/STAGE_SHEET.md](docs/STAGE_SHEET.md) | Run sheet for the physical demo |
+| [docs/SCALE_SHEET.md](docs/SCALE_SHEET.md) | ATAK-CIV and the dashboard, one operator to three assets |
 
 ---
 
@@ -626,7 +658,8 @@ Stated here so nobody has to discover them.
   Below `min_box_px` the solver reverts to centre-of-mass and says so in the audit log.
 - **140° pan arc.** Cues outside ±70° of boresight are rejected, not serviced.
 - **Visible spectrum only.** No night, no degraded visibility, no hit-spot verification.
-- **The effector is an LED.** Every firmware guardrail is sized for a hazardous effector
-  because the architecture claims this brain re-hosts onto one.
+- **The effector is a low-power KY-008 650 nm laser module**, a proxy for a high-energy
+  laser. Every firmware guardrail is sized for a hazardous effector because the
+  architecture claims this brain re-hosts onto one.
 - **MQTT is unauthenticated at transport in the demo config.** Payload validation and auth
   tokens are application-layer. Production requires mTLS.

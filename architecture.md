@@ -68,10 +68,10 @@ is the hardware-agnosticism claim, demonstrated rather than asserted.
                      ASCII lines, 250 ms deadman
                                 ▼
 ┌─────────────────────────────────────────────────────┐
-│ EDGE ACTUATOR  (ESP32-S3-WROOM-1, C++)              │
+│ EDGE ACTUATOR  (ESP32-S3-N16R8, C++)                │
 │                                                     │
 │  Parser → checksum → bounds clamp → LEDC → SG90×2   │
-│         → arming interlock → effector gate → LED    │
+│         → arming interlock → effector gate → laser  │
 │         → deadman (254 ms measured)                 │
 │         → burn ceiling (2002 ms measured)           │
 └─────────────────────────────────────────────────────┘
@@ -100,9 +100,13 @@ against a protocol that needs under 1 KB/s.
 
 | Function | GPIO | Notes |
 |---|---|---|
-| Servo PAN | 5 | LEDC ch 0, 50 Hz, 500–2400 µs |
-| Servo TILT | 6 | LEDC ch 1, 50 Hz |
-| Effector gate | 7 | 220 Ω → LED → GND, **10 kΩ pulldown to GND** |
+| Servo PAN | 14 | 50 Hz, 500–2400 µs map, travel limited to 20–160° |
+| Servo TILT | 21 | 50 Hz, travel limited to 45–135° |
+| Effector gate | 1 | 1 kΩ → 2N2222 base, collector sinks the KY-008 `−`, **10 kΩ pulldown to GND** |
+
+GPIO 4–13 and 15–18 belong to the OV5640 camera connector (ESP32-S3-EYE layout). The
+actuator moved off 5/6/7 in firmware v3; the firmware refuses to build if any actuator
+pin is a camera pin.
 
 Avoid GPIO 0/3/45/46 (strapping), 19/20 (native USB), 26–32 (flash/PSRAM).
 

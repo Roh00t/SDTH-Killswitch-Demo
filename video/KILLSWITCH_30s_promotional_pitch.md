@@ -1,5 +1,10 @@
 # KILLSWITCH — 30-Second Promotional Pitch
 
+> **Final render, submitted 27 September 2026:**
+> [`video-demo/killswitch_product_video.mp4`](../video-demo/killswitch_product_video.mp4)
+> (42 s, 1280×720). Built from `manim_code.py` and `SDTH_Video.ipynb` in this folder. This
+> file is the original brief.
+
 **Format:** Manim motion graphics + AI-generated cinematic footage  
 **Tone:** Premium defence-tech launch film; urgent, precise, credible  
 **Visual language:** Dark navy/black, cream-white typography, cherry-red threat and engagement graphics  

@@ -1,13 +1,56 @@
-Your Wi-Fi adapter is successfully locked to `Private`. Windows will now correctly route the incoming UDP multicast traffic for the WinTAK CoT XML stream instead of silently dropping it.
+# Bring the system live
 
-Gate 1 is fully cleared. You have confirmed a stable 5V external power rail with a common ground for the physical servos, and your network transport layer is properly configured.
+PowerShell, from the repo folder, **one command at a time**. `>>` in the prompt means
+several lines went in together. Every window's prompt must end in `SDTH-Killswitch-Demo>`.
 
-For your first full hardware-in-the-loop dry run at the NUS Defence Venture Lab hackathon today, launch the stack in this exact sequence:
+## 1. Hardware
 
-* **Terminal 1 (Broker):** `"C:\Program Files\mosquitto\mosquitto.exe" -v`
-* **Terminal 2 (Engine):** `python main.py --config config/fallback.yaml`
-* **Terminal 3 (Dashboard):** `start tools\c2_dashboard.html`
-* **Terminal 4 (Auth Gate):** `python -m tools.operator_console --config config/fallback.yaml`
-* **Terminal 5 (C2 Bridge):** `python -m tools.c2_bridge --threat-start-m 420`
+1. ESP32 USB into the **UART** port first (`COM3`, CH343), then the servo 5 V supply.
+2. Laptop and ESP32 on the same 2.4 GHz Wi-Fi (`WIFI_SSID` in
+   `firmware/esp32_actuator/wifi_secrets.h`).
+3. Laser at a matte backstop, nobody downrange. Target at the tape mark.
 
-Run Terminal 5 last to trigger the 14-second threat breach cycle. Let me know if the gimbal physically tracks the target once you hit `SPACE` in Terminal 4 to authorize the engagement.
+Flashing? Arduino IDE, **ESP32S3 Dev Module**, USB CDC On Boot **Disabled**, PSRAM **OPI
+PSRAM**, Flash Size **16MB**, Port `COM3`. The boot line must read
+`OK BOOT killswitch-actuator v3.5 … pwm=ok`. Close the Serial Monitor afterwards.
+
+## 2. Clean slate
+
+```powershell
+cd C:\Users\rohit\Documents\GitHub\SDTH-Killswitch-Demo
+Get-Process python* | Stop-Process -Force
+Get-Service mosquitto        # Start-Service mosquitto if it is not Running
+```
+
+## 3. Target, camera, preflight
+
+```powershell
+python -m tools.vision_probe --config config/bench.yaml      # drone photo; or config/fallback.yaml for a bird/frisbee
+python -m tools.camera_probe --config config/bench.yaml --find --write
+python -m tools.preflight --config config/bench.yaml
+```
+
+Keep the config that draws a box at 0.40 or more, and use it everywhere below. Wait for
+`READY`.
+
+## 4. Three windows, in this order
+
+| Window | Command | Wait for |
+|---|---|---|
+| B, node | `python main.py --config config/bench.yaml` | `C2 connected` |
+| C, operator console | `python -m tools.operator_console --config config/bench.yaml` | The camera in the console |
+| D, bridge (last) | `python -m tools.c2_bridge --config config/bench.yaml --threat-start-m 420` | The dashboard opens and reads PHYSICAL GIMBAL |
+
+TRACK → HOLD → amber, then click the console and press **SPACE**: a 1.8 s burn.
+
+Stop with Ctrl+C in D, then C, then B. The node parks the gimbal and turns the laser off.
+
+## Checks and tools
+
+```powershell
+python -m tools.serial_probe --port COM3 --servo-sweep    # listen at each end: a buzz is a stall
+python -m tools.serial_probe --port COM3                  # 13 interlock checks; FIRES the laser
+python -m tools.laser_test                                # node stopped: L toggles the laser
+python main.py --config config/fallback.yaml --sim-target # hardware-free demo, real MQTT
+pytest tests/ -q
+```
