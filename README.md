@@ -30,6 +30,19 @@ Also in the repo:
 - [`report/Killswitch_Report.docx`](report/Killswitch_Report.docx): the written report.
 - [`image/`](image/): block diagram and control-flow figures.
 
+
+### Killswitch Product Video
+[![Killswitch Product Video](https://youtube.com)](https://youtu.be/WYe1aDZlDnc)
+
+---
+
+### Prototype Demo Video
+[![Prototype Demo Video](https://youtube.com)](https://youtu.be/E08evXbD-2c)
+
+
+
+
+
 ### Team
 
 | Name | Role |
@@ -89,6 +102,7 @@ IDLE ──cue──▶ SCAN ──detect──▶ TRACK ──error≤15px─�
 
 `ENGAGE` has **exactly one predecessor**. There is no path to the effector that does not
 pass through a human.
+
 
 ---
 
